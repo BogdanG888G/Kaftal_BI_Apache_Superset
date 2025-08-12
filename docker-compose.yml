@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  superset:
+    build: .
+    image: superset-mssql:latest
+    container_name: superset
+    user: "0:0"  # Запускаем контейнер от root для правильных прав
+    ports:
+      - "8088:8088"
+    environment:
+      - SUPERSET_ENV=production
+      - FLASK_APP=superset.app:create_app()
+    volumes:
+      - superset_data:/app/superset_data  # Изменили путь для данных
+      - ./superset_config.py:/app/pythonpath/superset_config.py
+    networks:
+      - superset-network
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8088/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7.0-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - superset-network
+
+volumes:
+  superset_data:
+  redis_data:
+
+networks:
+  superset-network:
+    driver: bridge
