@@ -14,7 +14,7 @@ services:
     volumes:
       - superset_data:/app/superset_data  # Изменили путь для данных
       - ./superset_config.py:/app/pythonpath/superset_config.py
-    networks:
+    networks: 
       - superset-network
     depends_on:
       - redis
