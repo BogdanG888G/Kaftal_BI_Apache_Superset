@@ -1,54 +1,45 @@
-# -*- coding: utf-8 -*-
+from flask import Flask
+from superset.superset_typing import FlaskResponse
 import os
-
-
-# ==================== Безопасность ====================
+# ========================
+# Безопасность
+# ========================
 SECRET_KEY = "Icgez+z6E/2YkbSzBS2s4ZHlMCYhgOelN/oqEE6U8mH2qE8bltzHU2Z2"
+WTF_CSRF_ENABLED = True
+SESSION_COOKIE_SECURE = False  # Для разработки
 
-# ============ Основная база данных Superset ============
-# Для SQLite (текущая конфигурация)
+# ========================
+# Настройки баз данных
+# ========================
 SQLALCHEMY_DATABASE_URI = "sqlite:////app/superset_data/superset.db"
 
-# Для MSSQL (альтернативный вариант)
-# SQLALCHEMY_DATABASE_URI = (
-#     "mssql+pyodbc://username:password@host.docker.internal:1433/SupersetDB"
-#     "?driver=ODBC+Driver+17+for+SQL+Server"
-#     "&Encrypt=no&TrustServerCertificate=yes"
-# )
+# ========================
+# ClickHouse конфигурация
+# ========================
+CLICKHOUSE_DB_URL = "clickhouse+native://default:password@clickhouse:9000/default"
 
-# ============ Внешние подключения (доп. базы MSSQL) ============
-ADDITIONAL_DATABASE_CONNECTIONS = {
-    "MSSQL_TEST": {
-        "sqlalchemy_uri": (
-            "mssql+pyodbc://airflow_agent:123@host.docker.internal/Test"
-            "?driver=ODBC+Driver+17+for+SQL+Server"
-            "&Encrypt=yes&TrustServerCertificate=yes"
-        ),
-        "engine_params": {"connect_args": {"timeout": 30}},
-    },
+# ========================
+# Настройки производительности
+# ========================
+SUPERSET_WEBSERVER_TIMEOUT = 300
+SUPERSET_FEATURE_FLAGS = {
+    "ENABLE_TEMPLATE_PROCESSING": True,
+    "DASHBOARD_CROSS_FILTERS": True,
+    "GLOBAL_ASYNC_QUERIES": True,
 }
 
-# ==================== Доп. настройки ====================
-SUPERSET_ENV = "production"
-BABEL_DEFAULT_LOCALE = "ru"
-LANGUAGES = {
-    "en": {"flag": "us", "name": "English"},
-    "ru": {"flag": "ru", "name": "Russian"},
-}
+# ========================
+# Инициализация приложения
+# ========================
 
-# Конфигурация кэширования
-CACHE_CONFIG = {
-    'CACHE_TYPE': 'RedisCache',
-    'CACHE_DEFAULT_TIMEOUT': 86400,
-    'CACHE_KEY_PREFIX': 'superset_',
-    'CACHE_REDIS_URL': 'redis://redis:6379/0'
-}
 
-# Конфигурация Celery
-CELERY_CONFIG = {
-    "broker_url": "redis://redis:6379/0",
-    "result_backend": "redis://redis:6379/0",
-}
+def init_app(app: Flask):
+    # Установка SECRET_KEY из переменных окружения или файла
+    app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or 'your-default-secret-key-change-me'
 
-# Отключение предупреждений (опционально)
-SUPPRESS_WARNINGS = True
+    # Отключаем проблемные функции
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    app.config['ENCRYPTED_FIELD_KEY'] = os.environ.get('SECRET_KEY')[:32]
+
+# Минимальные настройки ClickHouse
+CLICKHOUSE_DB_URL = "clickhouse+native://default:@clickhouse:9000/default"

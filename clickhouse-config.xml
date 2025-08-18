@@ -1,0 +1,10 @@
+<yandex>
+    <listen_host>0.0.0.0</listen_host>
+    <logger>
+        <level>trace</level>
+    </logger>
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+    <mysql_port>9004</mysql_port>
+    <postgresql_port>9005</postgresql_port>
+</yandex>

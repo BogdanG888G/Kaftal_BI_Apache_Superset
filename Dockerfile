@@ -2,30 +2,37 @@ FROM apache/superset:latest
 
 USER root
 
-# 1. Установка системных зависимостей
+# 1. Установка системных зависимостей (без ODBC)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    gnupg \
+    gnupg2 \
+    ca-certificates \
     curl \
-    unixodbc \
-    odbcinst \
-    odbcinst1debian2 \
-    libodbc1 \
+    g++ \
+    make \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Установка драйвера MSSQL (новый метод)
-RUN mkdir -p /etc/apt/keyrings && \
-    curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg && \
-    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/11/prod bullseye main" > /etc/apt/sources.list.d/mssql-release.list && \
+# 2. Установка MSSQL ODBC драйвера (новый метод)
+RUN curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - && \
+    curl https://packages.microsoft.com/config/debian/11/prod.list > /etc/apt/sources.list.d/mssql-release.list && \
     apt-get update && \
-    ACCEPT_EULA=Y apt-get install -y msodbcsql17 && \
+    ACCEPT_EULA=Y apt-get install -y msodbcsql17 unixodbc && \
     rm -rf /var/lib/apt/lists/*
 
 # 3. Установка Python-зависимостей
-RUN pip install --no-cache-dir \
-    pyodbc==4.0.35 \
-    pillow
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r /app/requirements.txt && \
+    rm /app/requirements.txt
+
+# 4. Копирование конфигурации
+COPY superset_config.py /app/pythonpath/
+COPY docker-init.sh /app/
+
+# 5. Настройка прав
+RUN chown -R superset:superset /app && \
+    chmod +x /app/docker-init.sh
 
 USER superset
 
-# Точка входа остается стандартной (из базового образа)
+ENTRYPOINT ["/app/docker-init.sh"]
