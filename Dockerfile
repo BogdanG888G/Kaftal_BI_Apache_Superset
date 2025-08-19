@@ -25,6 +25,11 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /app/requirements.txt && \
     rm /app/requirements.txt
 
+# В существующий Dockerfile добавьте:
+COPY mssql_to_ch.py /app/
+RUN pip install clickhouse-driver
+RUN pip install tqdm pyodbc clickhouse-driver pandas
+
 # 4. Копирование конфигурации
 COPY superset_config.py /app/pythonpath/
 COPY docker-init.sh /app/

@@ -2,30 +2,36 @@
 
 set -e
 
-# Генерация нового SECRET_KEY если его нет
-if [ ! -f ~/.superset_secret_key ]; then
-    echo "Generating new SECRET_KEY"
-    python -c "import secrets; print(secrets.token_urlsafe(64))" > ~/.superset_secret_key
+# Инициализация только при первом запуске
+if [ ! -f ~/.superset_initialized ]; then
+    # Генерация SECRET_KEY
+    export SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(64))")
+    echo $SECRET_KEY > ~/.superset_secret_key
+    
+    # Инициализация БД
+    superset db upgrade
+    
+    # Создание администратора (с проверкой существования)
+    if ! superset fab list-users | grep -q admin; then
+        superset fab create-admin \
+            --username admin \
+            --firstname Admin \
+            --lastname User \
+            --email admin@example.com \
+            --password admin123
+    fi
+    
+    # Инициализация с фиксом для новых версий
+    superset init
+    
+    # Установка Pillow если нужно
+    pip install pillow || echo "Pillow installation failed, continuing without it"
+    
+    touch ~/.superset_initialized
 fi
+
+# Загрузка SECRET_KEY при последующих запусках
 export SECRET_KEY=$(cat ~/.superset_secret_key)
-
-# Инициализация базы данных
-superset db upgrade
-
-# Создание администратора (только при первом запуске)
-if [ ! -f ~/.superset_init_complete ]; then
-    superset fab create-admin \
-        --username admin \
-        --firstname Admin \
-        --lastname User \
-        --email admin@admin.com \
-        --password admin123
-    
-    # Инициализация с пропуском проблемных разрешений
-    superset init --skip-perms
-    
-    touch ~/.superset_init_complete
-fi
 
 # Запуск сервера
 exec gunicorn \

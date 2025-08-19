@@ -1,72 +1,99 @@
-version: '3.8'
+  version: '3.8'
 
-services:
-  superset:
-    build: .
-    image: superset-mssql:latest
-    container_name: superset
-    user: "0:0"
-    ports:
-      - "8088:8088"
-    environment:
-      - SUPERSET_ENV=production
-      - FLASK_APP=superset.app:create_app()
-      - FLASK_ENV=production
-    volumes:
-      - superset_data:/app/superset_data
-      - ./superset_config.py:/app/pythonpath/superset_config.py
-    networks: 
-      - superset-network
-    depends_on:
-      - redis
-      - clickhouse
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8088/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+  services:
+    superset:
+      build: .
+      image: superset-mssql:latest
+      container_name: superset
+      user: "0:0"
+      ports:
+        - "8088:8088"
+      environment:
+        - SUPERSET_ENV=production
+        - FLASK_APP=superset.app:create_app()
+        - FLASK_ENV=production
+      volumes:
+        - superset_data:/app/superset_data
+        - ./superset_config.py:/app/pythonpath/superset_config.py
+        - ./mssql_to_ch.py:/app/mssql_to_ch.py  # Добавляем скрипт переноса
+      networks: 
+        - superset-network
+      depends_on:
+        - redis
+        - clickhouse
+      healthcheck:
+        test: ["CMD-SHELL", "curl -f http://localhost:8088/health || exit 1"]
+        interval: 30s
+        timeout: 10s
+        retries: 3
 
-  redis:
-    image: redis:7.0-alpine
-    container_name: redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - superset-network
+    redis:
+      image: redis:7.0-alpine
+      container_name: redis
+      ports:
+        - "6379:6379"
+      volumes:
+        - redis_data:/data
+      networks:
+        - superset-network
 
-  clickhouse:
-    image: clickhouse/clickhouse-server:latest
-    container_name: clickhouse
-    environment:
-      - CLICKHOUSE_USER=admin
-      - CLICKHOUSE_PASSWORD=123
-      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
-    ports:
-      - "8123:8123"  # HTTP интерфейс
-      - "9000:9000"  # Native protocol
-    ulimits:
-      nproc: 65535
-      nofile:
-        soft: 262144
-        hard: 262144
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-      - ./clickhouse-config.xml:/etc/clickhouse-server/config.d/custom.xml
-    networks:
-      - superset-network
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+    clickhouse:
+      image: clickhouse/clickhouse-server:latest
+      container_name: clickhouse
+      environment:
+        - CLICKHOUSE_USER=admin
+        - CLICKHOUSE_PASSWORD=123
+        - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      ports:
+        - "8123:8123"  # HTTP интерфейс
+        - "9000:9000"  # Native protocol
+      ulimits:
+        nproc: 65535
+        nofile:
+          soft: 262144
+          hard: 262144
+      volumes:
+        - e:/clickhouse_data:/var/lib/clickhouse
+        - ./clickhouse-config.xml:/etc/clickhouse-server/config.d/custom.xml
+      networks:
+        - superset-network
+      healthcheck:
+        test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+        interval: 30s
+        timeout: 5s
+        retries: 3
 
-volumes:
-  superset_data:
-  redis_data:
-  clickhouse_data:
+    data-transfer:
+      build:
+        context: .
+        dockerfile: Dockerfile.data-transfer
+      container_name: data-transfer
+      networks:
+        - superset-network
+      depends_on:
+        - clickhouse
+        - superset
+      environment:
+        - MSSQL_SERVER=host.docker.internal
+        - MSSQL_PORT=1433
+        - MSSQL_DATABASE=Stage
+        - MSSQL_USER=superset_user
+        - MSSQL_PASSWORD=123
+        - CH_HOST=clickhouse
+        - CH_PORT=9000
+        - CH_USER=admin
+        - CH_PASSWORD=123
+        - TABLE_TO_TRANSFER=bi.ALL_DATA_COMPETITORS_MATERIALIZED  # Укажите нужную таблицу
+        - BATCH_SIZE=10000
+      volumes:
+        - ./mssql_to_ch.py:/app/mssql_to_ch.py  # Монтируем скрипт
+        - ./data:/app/data  # Для временных файлов, если нужно
 
-networks:
-  superset-network:
-    driver: bridge
+  volumes:
+    superset_data:
+    redis_data:
+    clickhouse_data:
+
+  networks:
+    superset-network:
+      driver: bridge

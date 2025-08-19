@@ -1,10 +1,22 @@
 <yandex>
-    <listen_host>0.0.0.0</listen_host>
     <logger>
         <level>trace</level>
+        <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+        <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
     </logger>
+    
     <http_port>8123</http_port>
     <tcp_port>9000</tcp_port>
-    <mysql_port>9004</mysql_port>
-    <postgresql_port>9005</postgresql_port>
+    
+    <!-- Настройки пользователей -->
+    <users>
+        <admin>
+            <password>123</password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+        </admin>
+    </users>
 </yandex>
