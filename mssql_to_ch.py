@@ -1,12 +1,12 @@
 import os
 import pyodbc
 from clickhouse_driver import Client
-import pandas as pd
 import logging
 from os import environ
-from tqdm import tqdm  # Для прогресс-бара
+from tqdm import tqdm
 import time
-from datetime import datetime
+from decimal import Decimal
+import datetime
 
 # Настройка логирования
 logging.basicConfig(
@@ -37,153 +37,289 @@ def get_mssql_connection():
         raise
 
 def get_clickhouse_client():
-    """Создает клиент ClickHouse"""
+    """Создает клиент ClickHouse с надежным подключением"""
     try:
         client = Client(
             host=environ.get('CH_HOST', 'clickhouse'),
             port=int(environ.get('CH_PORT', '9000')),
             user=environ.get('CH_USER', 'admin'),
-            password=environ.get('CH_PASSWORD', '123'),
+            password=environ.get('CH_PASSWORD', 'admin123'),
             settings={
-                'use_numpy': False,  # Включаем numpy для ускорения
-                'allow_experimental_object_type': 1,
-                'async_insert': 0,  # Асинхронная вставка
-                'wait_for_async_insert': 0,  # Не ждем завершения асинхронной вставки
-                'max_insert_block_size': 100_000  # Увеличиваем размер блока вставки
+                'use_numpy': False,
+                'max_insert_block_size': 100000,
+                'connect_timeout': 30,
+                'send_receive_timeout': 600,
+                'insert_block_size': 50000,
+                'async_insert': 1
             }
         )
+        # Проверяем соединение
+        client.execute('SELECT 1')
         logger.info("Успешное подключение к ClickHouse")
         return client
     except Exception as e:
         logger.error(f"Ошибка подключения к ClickHouse: {str(e)}")
-        raise
+        raise ConnectionError(f"Не удалось подключиться к ClickHouse: {str(e)}")
 
-def check_table_exists(cursor, schema, table_name):
-    """Проверяет существование таблицы"""
+def convert_value(value, column_name=None):
+    """
+    Конвертирует значения для ClickHouse.
+    Числовые → float, даты → date, строки → string, None → '' или 0.0
+    """
+    numeric_columns = {
+        'weight', 'sales_quantity', 'sales_amount_rub',
+        'avg_cost_price', 'avg_sell_price',
+        'sales_amount_with_vat', 'promo_sales_amount_with_vat',
+        'writeoff_quantity', 'writeoff_amount_rub',
+        'margin_amount_rub', 'loss_quantity', 'loss_amount_rub',
+        'sales_tons', 'sales_weight_kg'
+    }
+
+    # 1. None → дефолты
+    if value is None:
+        if column_name == 'sale_date':
+            return datetime.date(1970, 1, 1)
+        elif column_name in numeric_columns:
+            return 0.0
+        else:
+            return ''  # для строк
+
+    # 2. Decimal
+    if isinstance(value, Decimal):
+        return float(value)
+
+    # 3. Дата
+    if isinstance(value, datetime.datetime):
+        return value.date() if column_name == 'sale_date' else value
+    if isinstance(value, datetime.date):
+        return value
+
+    # 4. Строки
+    if isinstance(value, str):
+        text = value.strip()
+        if text in ['', '-', 'nan', 'NaN', 'null', 'None']:
+            return 0.0 if column_name in numeric_columns else ''
+        if column_name == 'sale_date':
+            try:
+                return datetime.datetime.strptime(text, '%Y-%m-%d').date()
+            except Exception:
+                return datetime.date(1970, 1, 1)
+        if column_name in numeric_columns:
+            try:
+                return float(text.replace(',', '.'))
+            except Exception:
+                return 0.0
+        return text
+
+    # 5. Булевое
+    if isinstance(value, bool):
+        return int(value)
+
+    # 6. Int / float
+    if isinstance(value, (int, float)):
+        return value
+
+    # 7. Fallback
     try:
-        cursor.execute(f"""
-        SELECT COUNT(*) 
-        FROM INFORMATION_SCHEMA.TABLES 
-        WHERE TABLE_SCHEMA = '{schema}' 
-        AND TABLE_NAME = '{table_name}'
-        """)
-        return cursor.fetchone()[0] > 0
-    except Exception as e:
-        logger.error(f"Ошибка при проверке таблицы: {str(e)}")
-        return False
+        return str(value)
+    except Exception:
+        return ''
 
-def get_total_rows(cursor, schema, table_name):
-    """Получает общее количество строк в таблице"""
-    try:
-        cursor.execute(f"SELECT COUNT(*) FROM [{schema}].[{table_name}]")
-        return cursor.fetchone()[0]
-    except Exception as e:
-        logger.error(f"Ошибка при получении количества строк: {str(e)}")
-        return 0
 
-def transfer_table(full_table_name, target_table=None, batch_size=100000):
-    """Переносит данные из MS SQL в ClickHouse (оптимизированная версия)"""
+def transfer_table(full_table_name, target_table=None, batch_size=50000):
+    """Оптимизированный перенос данных из MS SQL в ClickHouse"""
     start_time = time.time()
+    
     try:
-        # Разбираем имя таблицы
         schema, table_name = full_table_name.split('.') if '.' in full_table_name else ('dbo', full_table_name)
         target_table = target_table or table_name
         
         logger.info(f"Начало переноса из {schema}.{table_name} в {target_table}")
 
-        # Подключаемся к MS SQL
-        with get_mssql_connection() as mssql_conn:
-            cursor = mssql_conn.cursor()
+        # Подключаемся к базам данных
+        with get_mssql_connection() as mssql_conn, get_clickhouse_client() as ch_client:
+            mssql_cursor = mssql_conn.cursor()
             
-            # Получаем общее количество строк
-            total_rows = get_total_rows(cursor, schema, table_name)
-            logger.info(f"Всего строк для переноса: {total_rows:,}")
+            # Получаем информацию о колонках для правильного преобразования типов
+            columns_info = ch_client.execute(f"DESCRIBE TABLE {target_table}")
+            columns_map = {col[0]: col[1] for col in columns_info}
             
-            # Получаем структуру таблицы
-            cursor.execute(f"SELECT TOP 0 * FROM [{schema}].[{table_name}]")
-            columns = [column[0] for column in cursor.description]
+            # Создаем таблицу в ClickHouse (если не существует)
+            ch_client.execute(f"""
+                CREATE TABLE IF NOT EXISTS {target_table} (
+                    id UInt64,
+                    retail_chain String,
+                    sale_year UInt16,
+                    sale_month UInt8,
+                    sale_date Date,
+                    branch String,
+                    region String,
+                    city String,
+                    address String,
+                    store_format String,
+                    store_name String,
+                    product_name String,
+                    brand String,
+                    flavor String,
+                    weight Float64,
+                    product_type String,
+                    package_type String,
+                    product_level_1 String,
+                    product_level_2 String,
+                    product_level_3 String,
+                    product_level_4 String,
+                    product_family_code String,
+                    product_family_name String,
+                    product_article String,
+                    product_code String,
+                    barcode String,
+                    factory_code String,
+                    factory_name String,
+                    material String,
+                    vendor String,
+                    supplier String,
+                    warehouse_supplier String,
+                    sales_quantity Float64,
+                    sales_amount_rub Float64,
+                    avg_cost_price Float64,
+                    avg_sell_price Float64,
+                    sales_amount_with_vat Float64,
+                    promo_sales_amount_with_vat Float64,
+                    writeoff_quantity Float64,
+                    writeoff_amount_rub Float64,
+                    margin_amount_rub Float64,
+                    loss_quantity Float64,
+                    loss_amount_rub Float64,
+                    sales_tons Float64,
+                    sales_weight_kg Float64
+                ) ENGINE = MergeTree()
+                ORDER BY (sale_date, id)
+                SETTINGS index_granularity = 8192
+            """)
             
-            # Подключаемся к ClickHouse с оптимизированными настройками
-            ch_client = get_clickhouse_client()
+            # Получаем максимальный ID из ClickHouse
+            try:
+                max_id_ch = ch_client.execute(f"SELECT max(id) FROM {target_table}")[0][0] or 0
+                logger.info(f"Текущий максимальный ID в ClickHouse: {max_id_ch}")
+            except Exception as e:
+                logger.warning(f"Не удалось получить max ID: {str(e)}. Начинаем с 0")
+                max_id_ch = 0
+
+            # Получаем общее количество новых строк
+            count_query = f"SELECT COUNT(*) FROM [{schema}].[{table_name}] WHERE id > {max_id_ch}"
+            mssql_cursor.execute(count_query)
+            total_rows = mssql_cursor.fetchone()[0]
             
-            # Переносим данные пакетами с использованием server-side cursor
-            offset = 0
+            if total_rows == 0:
+                logger.info("Нет новых данных для переноса")
+                return
+                
+            logger.info(f"Найдено {total_rows:,} новых строк для переноса")
+
+            # Получаем информацию о колонках из MS SQL
+            mssql_cursor.execute(f"""
+                SELECT COLUMN_NAME, DATA_TYPE 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table_name}'
+            """)
+            mssql_columns = {row[0]: row[1] for row in mssql_cursor.fetchall()}
+
+            # Переносим данные пакетами
             transferred_rows = 0
+            last_id = max_id_ch
+            error_count = 0
+            error_log = open('error_rows.log', 'w')
             
-            # Настраиваем прогресс-бар
             with tqdm(total=total_rows, unit='rows', desc=f"Перенос {table_name}") as pbar:
-                while offset < total_rows:
-                    batch_start_time = time.time()
-                    
-                    # Используем серверный курсор для эффективной выборки
+                while True:
+                    # Более эффективный запрос с использованием ключа (id)
                     query = f"""
-                    SELECT * FROM (
-                        SELECT *, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) as row_num 
-                        FROM [{schema}].[{table_name}]
-                    ) t WHERE row_num BETWEEN {offset + 1} AND {offset + batch_size}
+                    SELECT TOP {batch_size} *
+                    FROM [{schema}].[{table_name}]
+                    WHERE id > {last_id}
+                    ORDER BY id
                     """
                     
-                    # Читаем данные без pandas (для экономии памяти)
-                    cursor.execute(query)
-                    rows = cursor.fetchall()
+                    mssql_cursor.execute(query)
+                    rows = mssql_cursor.fetchall()
                     
                     if not rows:
                         break
                     
-                    # Вставляем данные напрямую в ClickHouse
+                    # Получаем имена колонок
+                    columns = [column[0] for column in mssql_cursor.description]
+                    
+                    # Преобразуем данные для ClickHouse
+                    data = []
+                    for row in rows:
+                        try:
+                            processed_row = [
+                                convert_value(value, columns[i]) 
+                                for i, value in enumerate(row)
+                            ]
+                            data.append(processed_row)
+                            last_id = row[0]  # предполагаем, что id - первый столбец
+                        except Exception as e:
+                            error_count += 1
+                            error_log.write(f"Ошибка обработки строки {row[0]}: {str(e)}\n")
+                            continue
+                    
+                    # Вставка данных с обработкой ошибок
                     try:
                         ch_client.execute(
                             f"INSERT INTO {target_table} VALUES",
-                            rows,
-                            types_check=False,  # Отключаем проверку типов для скорости
-                            columnar=True     # Явно отключаем columnar режим
+                            data,
+                            types_check=True
                         )
+                        transferred_rows += len(data)
+                        pbar.update(len(data))
                     except Exception as e:
-                        logger.error(f"Ошибка при вставке блока: {str(e)}")
-                        # Альтернативный метод вставки при ошибке
-                        values = ','.join([str(tuple(row)) for row in rows])
-                        ch_client.execute(f"INSERT INTO {target_table} VALUES {values}")
-                    
-                    rows_inserted = len(rows)
-                    transferred_rows += rows_inserted
-                    offset += rows_inserted
-                    
-                    # Обновляем прогресс-бар
-                    pbar.update(rows_inserted)
-                    
-                    # Логируем статистику по батчу
-                    batch_time = time.time() - batch_start_time
-                    rows_per_sec = rows_inserted / batch_time if batch_time > 0 else 0
-                    
-                    logger.info(
-                        f"Блок {offset//batch_size}: {rows_inserted:,} строк за {batch_time:.2f} сек "
-                        f"({rows_per_sec:,.0f} строк/сек). Всего: {transferred_rows:,}/{total_rows:,}"
-                    )
+                        logger.error(f"Ошибка вставки блока: {str(e)}")
+                        # Попробуем вставить по одному
+                        for row in data:
+                            try:
+                                ch_client.execute(
+                                    f"INSERT INTO {target_table} VALUES",
+                                    [row],
+                                    types_check=True
+                                )
+                                transferred_rows += 1
+                                pbar.update(1)
+                            except Exception as e:
+                                error_count += 1
+                                error_log.write(f"Ошибка вставки строки {row[0]}: {str(e)}\n")
+                                logger.error(f"Ошибка вставки строки {row[0]}: {str(e)}")
+                                continue
             
+            error_log.close()
             total_time = time.time() - start_time
             logger.info(
-                f"Перенос завершен. Всего строк: {transferred_rows:,} "
+                f"Перенос завершен. Перенесено {transferred_rows:,} строк "
                 f"за {total_time:.2f} сек ({transferred_rows/total_time:,.0f} строк/сек)"
             )
-    
+            if error_count > 0:
+                logger.warning(f"Обнаружено {error_count} ошибок. Подробности в error_rows.log")
+            
     except Exception as e:
-        logger.error(f"Ошибка при переносе: {str(e)}", exc_info=True)
+        logger.error(f"Критическая ошибка при переносе: {str(e)}", exc_info=True)
         raise
 
 if __name__ == "__main__":
     try:
         # Настройки из переменных окружения
-        table_to_transfer = os.getenv('TABLE_TO_TRANSFER', 'bi.ALL_DATA_COMPETITORS_MATERIALIZED')
-        target_table = os.getenv('TARGET_TABLE', None)
-        batch_size = int(os.getenv('BATCH_SIZE', '100000'))
+        os.environ.setdefault('MSSQL_SERVER', 'host.docker.internal')
+        os.environ.setdefault('MSSQL_PORT', '1433')
+        os.environ.setdefault('MSSQL_USER', 'superset_user')
+        os.environ.setdefault('MSSQL_PASSWORD', '123')
         
-        logger.info(f"Запуск переноса таблицы: {table_to_transfer}")
-        logger.info(f"Параметры: batch_size={batch_size}, target_table={target_table}")
+        os.environ.setdefault('CH_HOST', 'clickhouse')
+        os.environ.setdefault('CH_PORT', '9000')
+        os.environ.setdefault('CH_USER', 'admin')
+        os.environ.setdefault('CH_PASSWORD', 'admin123')
         
         transfer_table(
-            full_table_name=table_to_transfer,
-            target_table=target_table,
-            batch_size=batch_size
+            full_table_name='bi.ALL_DATA_COMPETITORS_MATERIALIZED',
+            batch_size=50000  # Увеличенный размер блока
         )
     except Exception as e:
         logger.error(f"Фатальная ошибка: {str(e)}", exc_info=True)
