@@ -140,11 +140,8 @@ def transfer_table(full_table_name, target_table=None, batch_size=50000):
         with get_mssql_connection() as mssql_conn, get_clickhouse_client() as ch_client:
             mssql_cursor = mssql_conn.cursor()
             
-            # Получаем информацию о колонках для правильного преобразования типов
-            columns_info = ch_client.execute(f"DESCRIBE TABLE {target_table}")
-            columns_map = {col[0]: col[1] for col in columns_info}
-            
-            # Создаем таблицу в ClickHouse (если не существует)
+            # 1. Сначала создаем таблицу в ClickHouse (если не существует)
+            logger.info(f"Создание/проверка таблицы {target_table} в ClickHouse")
             ch_client.execute(f"""
                 CREATE TABLE IF NOT EXISTS {target_table} (
                     id UInt64,
@@ -197,16 +194,23 @@ def transfer_table(full_table_name, target_table=None, batch_size=50000):
                 SETTINGS index_granularity = 8192
             """)
             
-            # Получаем максимальный ID из ClickHouse
+            # 2. Теперь получаем информацию о колонках для правильного преобразования типов
+            logger.info("Получение информации о колонках ClickHouse")
+            columns_info = ch_client.execute(f"DESCRIBE TABLE {target_table}")
+            columns_map = {col[0]: col[1] for col in columns_info}
+            logger.debug(f"Колонки ClickHouse: {list(columns_map.keys())}")
+            
+            # 3. Получаем максимальный ID из ClickHouse
             try:
                 max_id_ch = ch_client.execute(f"SELECT max(id) FROM {target_table}")[0][0] or 0
                 logger.info(f"Текущий максимальный ID в ClickHouse: {max_id_ch}")
             except Exception as e:
-                logger.warning(f"Не удалось получить max ID: {str(e)}. Начинаем с 0")
+                logger.warning(f"Не удалось получить max ID (возможно таблица пустая): {str(e)}")
                 max_id_ch = 0
 
-            # Получаем общее количество новых строк
+            # 4. Получаем общее количество новых строк из MS SQL
             count_query = f"SELECT COUNT(*) FROM [{schema}].[{table_name}] WHERE id > {max_id_ch}"
+            logger.debug(f"Выполняем запрос: {count_query}")
             mssql_cursor.execute(count_query)
             total_rows = mssql_cursor.fetchone()[0]
             
@@ -216,23 +220,35 @@ def transfer_table(full_table_name, target_table=None, batch_size=50000):
                 
             logger.info(f"Найдено {total_rows:,} новых строк для переноса")
 
-            # Получаем информацию о колонках из MS SQL
+            # 5. Получаем информацию о колонках из MS SQL
             mssql_cursor.execute(f"""
                 SELECT COLUMN_NAME, DATA_TYPE 
                 FROM INFORMATION_SCHEMA.COLUMNS 
                 WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table_name}'
+                ORDER BY ORDINAL_POSITION
             """)
             mssql_columns = {row[0]: row[1] for row in mssql_cursor.fetchall()}
+            logger.debug(f"Колонки MS SQL: {list(mssql_columns.keys())}")
 
-            # Переносим данные пакетами
+            # 6. Переносим данные пакетами
             transferred_rows = 0
             last_id = max_id_ch
             error_count = 0
-            error_log = open('error_rows.log', 'w')
+            error_log_path = f'error_rows_{target_table}_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
             
-            with tqdm(total=total_rows, unit='rows', desc=f"Перенос {table_name}") as pbar:
+            with open(error_log_path, 'w', encoding='utf-8') as error_log, \
+                 tqdm(total=total_rows, unit='rows', desc=f"Перенос {table_name}") as pbar:
+                
+                error_log.write(f"Лог ошибок переноса таблицы {target_table}\n")
+                error_log.write(f"Время начала: {datetime.datetime.now()}\n")
+                error_log.write("="*50 + "\n")
+                
+                batch_count = 0
                 while True:
-                    # Более эффективный запрос с использованием ключа (id)
+                    batch_count += 1
+                    logger.debug(f"Обработка батча #{batch_count}, last_id={last_id}")
+                    
+                    # Эффективный запрос с использованием ключа (id)
                     query = f"""
                     SELECT TOP {batch_size} *
                     FROM [{schema}].[{table_name}]
@@ -244,66 +260,105 @@ def transfer_table(full_table_name, target_table=None, batch_size=50000):
                     rows = mssql_cursor.fetchall()
                     
                     if not rows:
+                        logger.debug("Больше данных нет для переноса")
                         break
                     
-                    # Получаем имена колонок
+                    # Получаем имена колонок из MS SQL
                     columns = [column[0] for column in mssql_cursor.description]
+                    logger.debug(f"Колонки в результате: {columns}")
                     
                     # Преобразуем данные для ClickHouse
                     data = []
-                    for row in rows:
+                    batch_errors = 0
+                    
+                    for row_idx, row in enumerate(rows):
                         try:
-                            processed_row = [
-                                convert_value(value, columns[i]) 
-                                for i, value in enumerate(row)
-                            ]
+                            processed_row = []
+                            for i, value in enumerate(row):
+                                column_name = columns[i] if i < len(columns) else f'column_{i}'
+                                processed_value = convert_value(value, column_name)
+                                processed_row.append(processed_value)
+                            
                             data.append(processed_row)
                             last_id = row[0]  # предполагаем, что id - первый столбец
+                            
                         except Exception as e:
                             error_count += 1
-                            error_log.write(f"Ошибка обработки строки {row[0]}: {str(e)}\n")
+                            batch_errors += 1
+                            error_msg = f"Ошибка обработки строки {row[0] if row else 'unknown'}: {str(e)}"
+                            error_log.write(error_msg + "\n")
+                            logger.debug(error_msg)
                             continue
                     
-                    # Вставка данных с обработкой ошибок
-                    try:
-                        ch_client.execute(
-                            f"INSERT INTO {target_table} VALUES",
-                            data,
-                            types_check=True
-                        )
-                        transferred_rows += len(data)
-                        pbar.update(len(data))
-                    except Exception as e:
-                        logger.error(f"Ошибка вставки блока: {str(e)}")
-                        # Попробуем вставить по одному
-                        for row in data:
-                            try:
-                                ch_client.execute(
-                                    f"INSERT INTO {target_table} VALUES",
-                                    [row],
-                                    types_check=True
-                                )
-                                transferred_rows += 1
-                                pbar.update(1)
-                            except Exception as e:
-                                error_count += 1
-                                error_log.write(f"Ошибка вставки строки {row[0]}: {str(e)}\n")
-                                logger.error(f"Ошибка вставки строки {row[0]}: {str(e)}")
-                                continue
+                    if batch_errors > 0:
+                        logger.warning(f"В батче #{batch_count} обнаружено {batch_errors} ошибок обработки")
+                    
+                    # Вставка данных в ClickHouse
+                    if data:
+                        try:
+                            ch_client.execute(
+                                f"INSERT INTO {target_table} VALUES",
+                                data,
+                                types_check=True
+                            )
+                            transferred_rows += len(data)
+                            pbar.update(len(data))
+                            logger.debug(f"Успешно вставлен батч #{batch_count} из {len(data)} строк")
+                            
+                        except Exception as e:
+                            logger.error(f"Ошибка вставки батча #{batch_count}: {str(e)}")
+                            
+                            # Пробуем вставить по одной строке
+                            single_success = 0
+                            for single_row in data:
+                                try:
+                                    ch_client.execute(
+                                        f"INSERT INTO {target_table} VALUES",
+                                        [single_row],
+                                        types_check=True
+                                    )
+                                    transferred_rows += 1
+                                    single_success += 1
+                                    pbar.update(1)
+                                except Exception as single_e:
+                                    error_count += 1
+                                    error_msg = f"Ошибка вставки строки {single_row[0]}: {str(single_e)}"
+                                    error_log.write(error_msg + "\n")
+                                    logger.debug(error_msg)
+                                    continue
+                            
+                            if single_success > 0:
+                                logger.info(f"Удалось вставить {single_success} строк по одной из проблемного батча")
+                    
+                    # Небольшая пауза между батчами чтобы не перегружать системы
+                    if batch_count % 10 == 0:
+                        time.sleep(0.1)
             
-            error_log.close()
+            # 7. Финализация
             total_time = time.time() - start_time
             logger.info(
                 f"Перенос завершен. Перенесено {transferred_rows:,} строк "
                 f"за {total_time:.2f} сек ({transferred_rows/total_time:,.0f} строк/сек)"
             )
+            
             if error_count > 0:
-                logger.warning(f"Обнаружено {error_count} ошибок. Подробности в error_rows.log")
+                logger.warning(f"Обнаружено {error_count} ошибок. Подробности в {error_log_path}")
+            else:
+                # Удаляем пустой лог ошибок
+                if os.path.exists(error_log_path):
+                    os.remove(error_log_path)
+            
+            # Проверяем итоговое количество строк
+            try:
+                final_count = ch_client.execute(f"SELECT count() FROM {target_table}")[0][0]
+                logger.info(f"Итоговое количество строк в {target_table}: {final_count:,}")
+            except Exception as e:
+                logger.warning(f"Не удалось проверить итоговое количество строк: {str(e)}")
             
     except Exception as e:
-        logger.error(f"Критическая ошибка при переносе: {str(e)}", exc_info=True)
+        logger.error(f"Критическая ошибка при переносе таблицы {target_table}: {str(e)}", exc_info=True)
         raise
-
+    
 if __name__ == "__main__":
     try:
         # Настройки из переменных окружения

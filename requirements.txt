@@ -1,7 +1,7 @@
-clickhouse-sqlalchemy==0.2.6
-clickhouse-driver==0.2.7
+clickhouse-sqlalchemy==0.2.4
+clickhouse-driver==0.2.4
 pyodbc==4.0.39
-sqlalchemy==1.4.48
+sqlalchemy<1.5,>=1.4.24
 pandas==1.5.3
 pyarrow==10.0.1
 redis==5.0.3

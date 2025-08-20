@@ -12,6 +12,8 @@ RUN apt-get update && \
     make \
     && rm -rf /var/lib/apt/lists/*
 
+    
+
 # 2. Установка MSSQL ODBC драйвера (новый метод)
 RUN curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - && \
     curl https://packages.microsoft.com/config/debian/11/prod.list > /etc/apt/sources.list.d/mssql-release.list && \
@@ -27,9 +29,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # В существующий Dockerfile добавьте:
 COPY mssql_to_ch.py /app/
-RUN pip install clickhouse-driver
 RUN pip install tqdm pyodbc clickhouse-driver pandas
 
+RUN pip install clickhouse-sqlalchemy==0.2.4 clickhouse-driver==0.2.4
 # 4. Копирование конфигурации
 COPY superset_config.py /app/pythonpath/
 COPY docker-init.sh /app/

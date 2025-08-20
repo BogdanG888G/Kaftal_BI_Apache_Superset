@@ -53,7 +53,7 @@
           soft: 262144
           hard: 262144
       volumes:
-        - e:/clickhouse_data:/var/lib/clickhouse
+        - clickhouse_data:/var/lib/clickhouse
         - ./clickhouse-config.xml:/etc/clickhouse-server/config.d/custom.xml
       networks:
         - superset-network
