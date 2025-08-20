@@ -1,9 +1,11 @@
 # 🚀 BI-платформа компании "Кафталь" на Superset + ClickHouse + MSSQL
 
-
-![Superset](https://img.shields.io/badge/Apache%20Airflow-017CEE?style=for-the-badge&logo=Apache%20Airflow&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
-![SQL Server](https://img.shields.io/badge/Microsoft%20SQL%20Server-CC2927?style=for-the-badge&logo=microsoft%20sql%20server&logoColor=white)
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.10-blue">
+  <img src="https://img.shields.io/badge/superset-3.x-yellow">
+  <img src="https://img.shields.io/badge/clickhouse-22+-orange">
+  <img src="https://img.shields.io/badge/Database-MSSQL-blueviolet">
+</p>
 
 Этот проект — полноценная **BI-среда в Docker**, где данные из MSSQL автоматически переливаются в ClickHouse, после чего визуализируются в Apache Superset. Всё разворачивается с нуля одной командой через `docker-compose up`.  
 
@@ -141,10 +143,3 @@ environment:
 
 
 ---
-
-<p align="center">
-  <img src="https://img.shields.io/badge/python-3.10-blue">
-  <img src="https://img.shields.io/badge/superset-3.x-yellow">
-  <img src="https://img.shields.io/badge/clickhouse-22+-orange">
-  <img src="https://img.shields.io/badge/Database-MSSQL-blueviolet">
-</p>
