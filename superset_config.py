@@ -1,5 +1,4 @@
 from flask import Flask
-from superset.superset_typing import FlaskResponse
 import os
 
 # ========================
@@ -7,7 +6,8 @@ import os
 # ========================
 SECRET_KEY = "Icgez+z6E/2YkbSzBS2s4ZHlMCYhgOelN/oqEE6U8mH2qE8bltzHU2Z2"
 WTF_CSRF_ENABLED = True
-SESSION_COOKIE_SECURE = False  # Для разработки
+SESSION_COOKIE_SECURE = False
+ENCRYPTED_FIELD_KEY = SECRET_KEY[:32]
 
 # ========================
 # Языковые настройки
@@ -22,16 +22,12 @@ LANGUAGES = {
 # Настройки баз данных
 # ========================
 SQLALCHEMY_DATABASE_URI = "sqlite:////app/superset_data/superset.db"
+SQLALCHEMY_TRACK_MODIFICATIONS = False
 
 # ========================
 # ClickHouse конфигурация
 # ========================
-# Основная строка подключения (используем HTTP протокол)
 CLICKHOUSE_DATABASE_URI = "clickhouse+http://admin:123@clickhouse:8123/default"
-
-# Альтернативные варианты (раскомментируйте если нужно)
-# CLICKHOUSE_DATABASE_URI = "clickhouse+native://admin:123@clickhouse:9000/default"
-# CLICKHOUSE_DATABASE_URI = "clickhouse://admin:123@clickhouse:8123/default"
 
 # ========================
 # Настройки производительности
@@ -44,64 +40,86 @@ SUPERSET_FEATURE_FLAGS = {
 }
 
 # ========================
-# Дополнительные настройки SQLAlchemy
+# Тест подключения к ClickHouse
 # ========================
-SQLALCHEMY_TRACK_MODIFICATIONS = False
-SQLALCHEMY_ECHO = False  # Для отладки установите True
-
-# ========================
-# Настройки подключения к базам данных
-# ========================
-# Разрешаем подключение к различным БД
-PREVENT_UNSAFE_DB_CONNECTIONS = False
+def test_clickhouse_connection():
+    try:
+        from sqlalchemy import create_engine
+        
+        test_urls = [
+            "clickhouse+http://admin:123@clickhouse:8123/default",
+            "clickhouse://admin:123@clickhouse:8123/default"
+        ]
+        
+        for url in test_urls:
+            try:
+                engine = create_engine(url)
+                with engine.connect() as conn:
+                    result = conn.execute('SELECT 1 AS test_value')
+                    print(f"✓ ClickHouse connection SUCCESS: {result.scalar()}")
+                    return True
+            except Exception as e:
+                print(f"✗ ClickHouse connection FAILED with {url}: {str(e)[:200]}")
+        
+        return False
+        
+    except Exception as e:
+        print(f"✗ ClickHouse test setup failed: {e}")
+        return False
 
 # ========================
 # Инициализация приложения
 # ========================
 def init_app(app: Flask):
-    # Установка SECRET_KEY
-    app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or SECRET_KEY
+    # Безопасность
+    app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', SECRET_KEY)
+    app.config['ENCRYPTED_FIELD_KEY'] = os.environ.get('ENCRYPTED_FIELD_KEY', ENCRYPTED_FIELD_KEY)
+    app.config['WTF_CSRF_ENABLED'] = WTF_CSRF_ENABLED
+    app.config['SESSION_COOKIE_SECURE'] = SESSION_COOKIE_SECURE
     
-    # Ключ для шифрования полей
-    app.config['ENCRYPTED_FIELD_KEY'] = os.environ.get('SECRET_KEY')[:32] if os.environ.get('SECRET_KEY') else SECRET_KEY[:32]
+    # Базы данных
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('SQLALCHEMY_DATABASE_URI', SQLALCHEMY_DATABASE_URI)
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = SQLALCHEMY_TRACK_MODIFICATIONS
     
-    # Языковые настройки
+    # Язык
     app.config['BABEL_DEFAULT_LOCALE'] = BABEL_DEFAULT_LOCALE
     app.config['LANGUAGES'] = LANGUAGES
     
-    # Настройки производительности
+    # Производительность
     app.config['SUPERSET_WEBSERVER_TIMEOUT'] = SUPERSET_WEBSERVER_TIMEOUT
     app.config['SUPERSET_FEATURE_FLAGS'] = SUPERSET_FEATURE_FLAGS
     
-    # SQLAlchemy настройки
-    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = SQLALCHEMY_TRACK_MODIFICATIONS
-    
-    print("Superset configuration loaded successfully")
-
-# ========================
-# Регистрация драйверов БД
-# ========================
-# Явно регистрируем ClickHouse драйвер
-try:
-    from superset.db_engine_specs.clickhouse import ClickHouseEngineSpec
-    # Принудительно добавляем в доступные драйверы
-    DATABASE_DRIVERS = {
-        'clickhouse': ClickHouseEngineSpec
-    }
-    print("ClickHouse driver registered successfully")
-except ImportError as e:
-    print(f"Warning: Could not import ClickHouseEngineSpec: {e}")
-
-# ========================
-# Переменные для тестирования
-# ========================
-if __name__ == "__main__":
-    print("Testing ClickHouse connection...")
+    # Тестируем подключение
     try:
-        from sqlalchemy import create_engine
-        engine = create_engine(CLICKHOUSE_DATABASE_URI)
-        with engine.connect() as conn:
-            result = conn.execute('SELECT 1')
-            print(f"Connection successful: {result.scalar()}")
+        connection_test = test_clickhouse_connection()
+        if connection_test:
+            print("✓ ClickHouse ready for use")
+        else:
+            print("⚠ ClickHouse connection failed")
     except Exception as e:
-        print(f"Connection failed: {e}")
+        print(f"⚠ ClickHouse test skipped: {e}")
+    
+    print("✓ Superset configuration initialized")
+
+# ========================
+# Дополнительные настройки
+# ========================
+PREVENT_UNSAFE_DB_CONNECTIONS = False
+ENABLE_TIME_ROTATE = False
+LOG_LEVEL = 'INFO'
+
+# ========================
+# Принудительная регистрация драйвера (после инициализации)
+# ========================
+def register_clickhouse_driver():
+    try:
+        # Простая регистрация через импорт
+        import clickhouse_sqlalchemy
+        print("✓ ClickHouse SQLAlchemy driver loaded")
+        return True
+    except ImportError as e:
+        print(f"✗ ClickHouse driver not available: {e}")
+        return False
+
+# Запускаем регистрацию при загрузке модуля
+register_clickhouse_driver()
