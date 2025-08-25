@@ -211,6 +211,18 @@ class EnhancedOSMExtractor:
             conn = get_db_connection()
             cursor = conn.cursor()
             
+            # Проверяем, существует ли уже запись с таким адресом и сетью
+            check_sql = """
+            SELECT COUNT(*) FROM [Stage].[bi].[STORE_CHARACTERISTICS] 
+            WHERE retail_chain = ? AND address = ?
+            """
+            cursor.execute(check_sql, data.get('network', ''), data.get('original_address', data.get('address', '')))
+            count = cursor.fetchone()[0]
+            
+            if count > 0:
+                logger.info(f"Запись уже существует: {data.get('network', '')} - {data.get('original_address', data.get('address', ''))}")
+                return True
+            
             # Подготовка данных для вставки
             retail_chain = data.get('network', '')
             store_format = data.get('format', '')
@@ -224,30 +236,38 @@ class EnhancedOSMExtractor:
             else:
                 area_m2 = self.get_area_from_range(retail_chain, store_format)
                 
-            has_alcohol_department = 1 if data.get('has_alcohol', False) else 1
-            has_snacks = 1 if data.get('has_grocery', False) else 1
+            has_alcohol_department = 1 if data.get('has_alcohol', False) else 0
+            has_snacks = 1 if data.get('has_grocery', False) else 0
             
             # Определяем тип магазина
             store_type = self.get_store_type(retail_chain, store_format)
             
+            # Получаем данные о продажах из исходной таблицы
+            sales_data = self.get_sales_data(retail_chain, address)
+            
             # SQL запрос для вставки данных
             sql = """
             INSERT INTO [Stage].[bi].[STORE_CHARACTERISTICS] 
-            (retail_chain, store_format, address, lat, lon, area_m2, has_alcohol_department, has_snacks, store_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (retail_chain, store_format, store_type, address, sales_quantity, sales_amount_rub, 
+             avg_sell_price, avg_cost_price, lat, lon, area_m2, has_alcohol_department, has_snacks, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE())
             """
             
             # Выполнение запроса
             cursor.execute(sql, 
                           retail_chain, 
                           store_format, 
+                          store_type,
                           address, 
+                          sales_data['sales_quantity'],
+                          sales_data['sales_amount_rub'],
+                          sales_data['avg_sell_price'],
+                          sales_data['avg_cost_price'],
                           lat, 
                           lon, 
                           area_m2, 
                           has_alcohol_department, 
-                          has_snacks,
-                          store_type)
+                          has_snacks)
             
             conn.commit()
             logger.info(f"Данные успешно сохранены в базу для {retail_chain} - {address}")
@@ -257,15 +277,61 @@ class EnhancedOSMExtractor:
             logger.error(f"Ошибка при сохранении в базу данных: {e}")
             return False
 
-    def get_data_from_source_table(self, limit: int = 100) -> List[Dict]:
+    def get_sales_data(self, retail_chain: str, address: str) -> Dict[str, Any]:
+        """Получение данных о продажах из исходной таблицы"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            sql = """
+            SELECT 
+                SUM(sales_quantity) as total_quantity,
+                SUM(sales_amount_rub) as total_amount,
+                AVG(avg_sell_price) as avg_sell,
+                AVG(avg_cost_price) as avg_cost
+            FROM [Stage].[bi].[ALL_DATA_COMPETITORS_MATERIALIZED]
+            WHERE retail_chain = ? AND address = ?
+            GROUP BY retail_chain, address
+            """
+            
+            cursor.execute(sql, retail_chain, address)
+            row = cursor.fetchone()
+            
+            if row:
+                return {
+                    'sales_quantity': row.total_quantity if row.total_quantity else 0,
+                    'sales_amount_rub': row.total_amount if row.total_amount else 0.0,
+                    'avg_sell_price': row.avg_sell if row.avg_sell else 0.0,
+                    'avg_cost_price': row.avg_cost if row.avg_cost else 0.0
+                }
+            else:
+                # Если данных нет, возвращаем нулевые значения
+                return {
+                    'sales_quantity': 0,
+                    'sales_amount_rub': 0.0,
+                    'avg_sell_price': 0.0,
+                    'avg_cost_price': 0.0
+                }
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении данных о продажах: {e}")
+            return {
+                'sales_quantity': 0,
+                'sales_amount_rub': 0.0,
+                'avg_sell_price': 0.0,
+                'avg_cost_price': 0.0
+            }
+
+    def get_data_from_source_table(self) -> List[Dict]:
         """Получение данных из исходной таблицы"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
             
             sql = f"""
-            SELECT TOP {limit} retail_chain, store_format, address
+            SELECT distinct retail_chain, store_format, address
             FROM [Stage].[bi].[ALL_DATA_COMPETITORS_MATERIALIZED]
+            WHERE retail_chain IS NOT NULL AND address IS NOT NULL
             """
             
             cursor.execute(sql)
@@ -636,15 +702,15 @@ class EnhancedOSMExtractor:
         # Определяем формат магазина
         shop_type = tags.get('shop', '')
         format_mapping = {
-            'supermarket': 'супермаркет',
-            'hypermarket': 'гипермаркет',
-            'convenience': 'магазин у дома',
-            'discount': 'дискаунтер',
-            'department_store': 'универмаг',
-            'mall': 'торговый центр',
-            'wholesale': 'оптовый'
+            'supermarket': 'Супермаркет',
+            'hypermarket': 'Гипермаркет',
+            'convenience': 'Магазин у дома',
+            'discount': 'Дискаунтер',
+            'department_store': 'Универмаг',
+            'mall': 'Торговый центр',
+            'wholesale': 'Оптовый'
         }
-        tt_format = format_mapping.get(shop_type, 'другой')
+        tt_format = format_mapping.get(shop_type, 'Другой')
 
         # Более точное определение алкоголя
         alcohol_tags = {
@@ -653,7 +719,7 @@ class EnhancedOSMExtractor:
             'drink:beer': 'yes'
         }
 
-        has_alcohol = True
+        has_alcohol = False
         for tag, values in alcohol_tags.items():
             if tag in tags:
                 if isinstance(values, list):
@@ -761,9 +827,9 @@ class EnhancedOSMExtractor:
         
         # Специфичные настройки для некоторых сетей
         if 'магнит' in network_lower and 'косметик' in network_lower:
-            has_grocery = True
+            has_grocery = False
         elif 'алкоторг' in network_lower or 'алкомаркет' in network_lower:
-            has_grocery = True
+            has_grocery = False
         
         return {
             'network': network,
@@ -814,11 +880,11 @@ class EnhancedOSMExtractor:
             
             return manual_info
 
-    def process_batch_from_database(self, batch_size: int = 100):
+    def process_batch_from_database(self):
         """Обработка пакета данных из исходной таблицы"""
         try:
             # Получаем данные из исходной таблицы
-            source_data = self.get_data_from_source_table(batch_size)
+            source_data = self.get_data_from_source_table()  # Исправлено: добавлены скобки
             
             logger.info(f"Найдено {len(source_data)} записей для обработки")
             
@@ -849,7 +915,7 @@ def main():
     extractor = EnhancedOSMExtractor()
 
     # Обработка пакета данных из базы
-    extractor.process_batch_from_database(100)
+    extractor.process_batch_from_database()
 
     # Для тестирования одного адреса
     # test_address = "липецкая обл, липецк г, свиридова и.в. ул, дом № 22,корпус 1,помещение 1"

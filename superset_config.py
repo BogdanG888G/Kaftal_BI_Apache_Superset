@@ -1,9 +1,22 @@
+
+
 from flask import Flask
 import os
 
 # ========================
 # Безопасность
 # ========================
+
+# В superset_config.py
+from superset.typing import DashboardMeta
+FEATURE_FLAGS = {
+    "ALLOW_FULL_JSONP": True,
+    "DASHBOARD_CACHE": True,
+}
+
+# Используйте OpenStreetMap вместо Mapbox
+DECK_GL_MAP_STYLE = "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json"
+
 SECRET_KEY = "Icgez+z6E/2YkbSzBS2s4ZHlMCYhgOelN/oqEE6U8mH2qE8bltzHU2Z2"
 WTF_CSRF_ENABLED = True
 SESSION_COOKIE_SECURE = False

@@ -2,30 +2,35 @@ FROM apache/superset:latest
 
 USER root
 
+# Установка системных зависимостей
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    gnupg2 ca-certificates curl g++ make && \
-    rm -rf /var/lib/apt/lists/*
+    freetds-dev \
+    freetds-bin \
+    unixodbc-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - && \
-    curl https://packages.microsoft.com/config/debian/11/prod.list > /etc/apt/sources.list.d/mssql-release.list && \
-    apt-get update && \
-    ACCEPT_EULA=Y apt-get install -y msodbcsql17 unixodbc && \
-    rm -rf /var/lib/apt/lists/*
+# Установка pip в виртуальное окружение
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | /app/.venv/bin/python
+
+# Установка драйверов через установленный pip
+RUN /app/.venv/bin/pip install --no-cache-dir pymssql pyodbc
 
 COPY requirements.txt /app/
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r /app/requirements.txt && \
-    rm /app/requirements.txt
+RUN if [ -f /app/requirements.txt ]; then \
+    /app/.venv/bin/pip install --no-cache-dir -r /app/requirements.txt; \
+    fi && \
+    rm -f /app/requirements.txt
 
 COPY mssql_to_ch.py /app/
-RUN pip install tqdm pyodbc pandas \
+RUN /app/.venv/bin/pip install --no-cache-dir tqdm pandas \
     clickhouse-driver==0.2.4 clickhouse-sqlalchemy==0.2.4
 
 COPY superset_config.py /app/pythonpath/
 COPY docker-init.sh /app/
 
-RUN chown -R superset:superset /app && chmod +x /app/docker-init.sh
+RUN chown -R superset:superset /app && \
+    chmod +x /app/docker-init.sh
 
 USER superset
 ENTRYPOINT ["/app/docker-init.sh"]
