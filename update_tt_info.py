@@ -72,6 +72,138 @@ class EnhancedOSMExtractor:
         self.session.headers.update({
             'User-Agent': 'TT-Analyzer-Research/1.0 (research-project@example.com)'
         })
+        # Обновленные диапазоны площадей для различных сетей и форматов
+        self.area_ranges = {
+            'магнит': {
+                'пр': (250, 350),        # Продуктовый магазин
+                'бф': (800, 1200),       # Бизнес-формат
+                'мд': (300, 500),        # Магазин у дома
+                'мк': (200, 300),        # Магнит Косметик
+                'default': (250, 350)
+            },
+            'ашан': {
+                'ашан': (8000, 12000),    # Гипермаркет
+                'ашан сити': (800, 1200), # Супермаркет
+                'дарк стор': (500, 1500), # Темный склад
+                'наша радуга': (800, 2500 ), # Супермаркет
+                'default': (1000, 2000)
+            },
+            'пятерочка': {
+                'default': (300, 450)
+            },
+            'пятёрочка': {
+                'default': (300, 450)
+            },
+            'перекресток': {
+                'default': (750, 1200)
+            },
+            'перекрёсток': {
+                'default': (750, 1200)
+            },
+            'дикси': {
+                'дикси': (300, 500),
+                'default': (300, 500)
+            },
+            'окей': {
+                'default': (5000, 10000 )
+            },
+            'x5 united': {
+                'default': (750, 1200)
+            },
+            'пятъница': {
+                'default': (250, 350)
+            },
+            'чижик': {
+                'default': (250, 350)
+            },
+            'перекрёсток-джем': {
+                'default': (250, 350)
+            },
+            'default': {
+                'гипермаркет': (8000, 12000),
+                'супермаркет': (700, 1000),
+                'магазин у дома': (200, 300),
+                'торговый центр': (5000, 20000),
+                'складской клуб': (3000, 5000),
+                'default': (200, 400)
+            }
+        }
+
+        # Словарь для определения store_type на основе сети и формата
+        self.store_type_mapping = {
+            'магнит': {
+                'пр': 'магазин у дома'.capitalize(),
+                'бф': 'супермаркет'.capitalize(),
+                'мд': 'магазин у дома'.capitalize(),
+                'мк': 'косметический'.capitalize(),
+                'default': 'магазин у дома'.capitalize()    
+            },
+            'ашан': {
+                'ашан': 'гипермаркет'.capitalize(),
+                'ашан сити': 'супермаркет'.capitalize(),
+                'дарк стор': 'тёмный склад'.capitalize(),
+                'наша радуга': 'супермаркет'.capitalize(),
+                'default': 'гипермаркет'.capitalize()
+            },
+            'пятерочка': {'default': 'магазин у дома'.capitalize()},
+            'пятёрочка': {'default': 'магазин у дома'.capitalize()},
+            'перекресток': {'default': 'супермаркет'.capitalize()},
+            'перекрёсток': {'default': 'супермаркет'.capitalize()},
+            'дикси': {'дикси': 'магазин у дома'.capitalize(), 'default': 'магазин у дома'.capitalize()},
+            'окей': {'default': 'гипермаркет'.capitalize()},
+            'x5 united': {'default': 'магазин у дома'.capitalize()},
+            'пятъница': {'default': 'магазин у дома'.capitalize()},
+            'чижик': {'default': 'дискаунтер'.capitalize()},
+            'перекрёсток-джем': {'default': 'магазин у дома'.capitalize()},
+            'default': {
+                'гипермаркет': 'гипермаркет'.capitalize(),
+                'супермаркет': 'супермаркет'.capitalize(),
+                'магазин у дома': 'магазин у дома'.capitalize(),
+                'торговый центр': 'торговый центр'.capitalize(),
+                'складской клуб': 'складской'.capitalize(),
+                'default': 'магазин у дома'.capitalize()
+            }
+        }
+
+    def get_store_type(self, network: str, format_type: str) -> str:
+        """Определение типа магазина на основе сети и формата"""
+        network_lower = network.lower()
+        format_lower = format_type.lower() if format_type else 'default'
+        
+        if network_lower in self.store_type_mapping:
+            network_types = self.store_type_mapping[network_lower]
+            if format_lower in network_types:
+                return network_types[format_lower]
+            return network_types.get('default', 'магазин у дома'.capitalize())
+        
+        return self.store_type_mapping['default'].get(format_lower, 
+                    self.store_type_mapping['default']['default'])
+    
+    def get_area_from_range(self, network: str, format_type: str) -> float:
+        """Получение площади на основе диапазона для сети и формата"""
+        network_lower = network.lower()
+        format_lower = format_type.lower() if format_type else 'default'
+        
+        # Ищем сеть в словаре
+        if network_lower in self.area_ranges:
+            network_ranges = self.area_ranges[network_lower]
+            
+            # Ищем конкретный формат
+            if format_lower in network_ranges:
+                area_range = network_ranges[format_lower]
+            else:
+                # Используем значение по умолчанию для сети
+                area_range = network_ranges.get('default', (200, 400))
+        else:
+            # Сеть не найдена, используем общие диапазоны по формату
+            default_ranges = self.area_ranges['default']
+            if format_lower in default_ranges:
+                area_range = default_ranges[format_lower]
+            else:
+                area_range = default_ranges['default']
+        
+        # Генерируем случайное значение в диапазоне
+        return int(np.random.uniform(area_range[0], area_range[1]))
 
     def save_to_database(self, data: Dict[str, Any]) -> bool:
         """Сохраняет данные о торговой точке в базу данных"""
@@ -85,15 +217,24 @@ class EnhancedOSMExtractor:
             address = data.get('original_address', data.get('address', ''))
             lat = data.get('coordinates', {}).get('lat', 0)
             lon = data.get('coordinates', {}).get('lon', 0)
-            area_m2 = data.get('area', data.get('estimated_area', 0))
-            has_alcohol_department = 1 if data.get('has_alcohol', False) else 0
-            has_snacks = 1 if data.get('has_grocery', False) else 0
+            
+            # Определяем площадь: если есть из OSM, используем, иначе из диапазона
+            if data.get('area') is not None:
+                area_m2 = data.get('area')
+            else:
+                area_m2 = self.get_area_from_range(retail_chain, store_format)
+                
+            has_alcohol_department = 1 if data.get('has_alcohol', False) else 1
+            has_snacks = 1 if data.get('has_grocery', False) else 1
+            
+            # Определяем тип магазина
+            store_type = self.get_store_type(retail_chain, store_format)
             
             # SQL запрос для вставки данных
             sql = """
             INSERT INTO [Stage].[bi].[STORE_CHARACTERISTICS] 
-            (retail_chain, store_format, address, lat, lon, area_m2, has_alcohol_department, has_snacks)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (retail_chain, store_format, address, lat, lon, area_m2, has_alcohol_department, has_snacks, store_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             
             # Выполнение запроса
@@ -105,7 +246,8 @@ class EnhancedOSMExtractor:
                           lon, 
                           area_m2, 
                           has_alcohol_department, 
-                          has_snacks)
+                          has_snacks,
+                          store_type)
             
             conn.commit()
             logger.info(f"Данные успешно сохранены в базу для {retail_chain} - {address}")
@@ -140,7 +282,7 @@ class EnhancedOSMExtractor:
             return result
             
         except Exception as e:
-            logger.error(f"Ошибка при получении данных из таблицы: {e}")
+            logger.error(f"Ошибка при получении данных из таблица: {e}")
             return []
 
     def determine_network_subtype(self, network: str, address: str, store_format: str = None) -> str:
@@ -207,7 +349,7 @@ class EnhancedOSMExtractor:
         replacements = {
             'г\.': 'город ',
             'с\.': 'село ',
-            'ул\.': 'улица ',
+            'ул\.': 'улица ', 
             'пр\.': 'проспект ',
             'пер\.': 'переулок ',
             'д\.': 'дом ',
@@ -402,7 +544,7 @@ class EnhancedOSMExtractor:
             results = self._nominatim_search(query)
             if results:
                 all_results.extend(results)
-            time.sleep(0.3)
+            time.sleep(3)
 
         return all_results
 
@@ -436,7 +578,7 @@ class EnhancedOSMExtractor:
                 continue
 
             # Небольшая задержка между стратегиями
-            time.sleep(0.5)
+            time.sleep(3)
 
         return all_results
 
@@ -511,7 +653,7 @@ class EnhancedOSMExtractor:
             'drink:beer': 'yes'
         }
 
-        has_alcohol = False
+        has_alcohol = True
         for tag, values in alcohol_tags.items():
             if tag in tags:
                 if isinstance(values, list):
@@ -602,110 +744,39 @@ class EnhancedOSMExtractor:
 
     def manual_tt_estimation(self, network: str, address: str, store_format: str = None) -> Dict[str, Any]:
         """Расширенная ручная оценка параметров ТТ"""
-        network_profiles = {
-            'пятерочка': {
-                'format': 'магазин у дома',
-                'avg_area': 300,
-                'has_alcohol': True,
-                'has_grocery': True,
-                'avg_check': 450
-            },
-            'перекресток': {
-                'format': 'супермаркет',
-                'avg_area': 800,
-                'has_alcohol': True,
-                'has_grocery': True,
-                'avg_check': 1200
-            },
-            'магнит': {
-                'format': 'магазин у дома',
-                'avg_area': 250,
-                'has_alcohol': False,
-                'has_grocery': True,
-                'avg_check': 350
-            },
-            'лента': {
-                'format': 'гипермаркет',
-                'avg_area': 2500,
-                'has_alcohol': True,
-                'has_grocery': True,
-                'avg_check': 1800
-            },
-            'ашан': {
-                'format': 'гипермаркет',
-                'avg_area': 4000,
-                'has_alcohol': True,
-                'has_grocery': True,
-                'avg_check': 2200,
-                'subformats': {
-                    'ашан сити': {'format': 'супермаркет', 'avg_area': 800},
-                    'ашан экспресс': {'format': 'магазин у дома', 'avg_area': 300}
-                }
-            },
-            'дикси': {
-                'format': 'магазин у дома',
-                'avg_area': 280,
-                'has_alcohol': True,
-                'has_grocery': True,
-                'avg_check': 400
-            }
-        }
-
+        # Сначала определяем формат магазина
+        if not store_format:
+            store_format = self.determine_network_subtype(network, address)
+        
+        # Получаем площадь на основе сети и формата
+        estimated_area = self.get_area_from_range(network, store_format)
+        
+        # Получаем координаты через геокодирование
+        coords = self.get_coordinates_from_address(address)
+        
+        # Определяем наличие алкоголя и снеков на основе сети
         network_lower = network.lower()
-        profile = None
-        subformat = None
-
-        # Поиск основного профиля
-        for key, value in network_profiles.items():
-            if key in network_lower:
-                profile = value.copy()
-                break
-
-        # Проверяем наличие подформатов
-        if profile and 'subformats' in profile:
-            for sub_name, sub_profile in profile['subformats'].items():
-                if sub_name in network_lower:
-                    profile.update(sub_profile)
-                    break
-
-        if profile:
-            # Получаем координаты через геокодирование
-            coords = self.get_coordinates_from_address(address)
-
-            # Определяем формат (приоритет: переданный формат > профиль сети)
-            final_format = store_format if store_format else profile['format']
-
-            return {
-                'network': network,
-                'address': address,
-                'format': final_format,
-                'estimated_area': profile['avg_area'],
-                'has_alcohol': profile['has_alcohol'],
-                'has_grocery': profile['has_grocery'],
-                'estimated_avg_check': profile.get('avg_check', 500),
-                'coordinates': coords,
-                'source': 'network_profile',
-                'confidence': 'medium'
-            }
-        else:
-            # Общая оценка для неизвестных сетей
-            coords = self.get_coordinates_from_address(address)
-            
-            # Определяем формат
-            final_format = store_format if store_format else self.determine_network_subtype(network, address)
-
-            return {
-                'network': network,
-                'address': address,
-                'format': final_format,
-                'estimated_area': 200,
-                'has_alcohol': True,
-                'has_grocery': True,
-                'estimated_avg_check': 500,
-                'coordinates': coords,
-                'source': 'generic_estimate',
-                'confidence': 'low'
-            }
+        has_alcohol = True  # по умолчанию
+        has_grocery = True  # по умолчанию
+        
+        # Специфичные настройки для некоторых сетей
+        if 'магнит' in network_lower and 'косметик' in network_lower:
+            has_grocery = True
+        elif 'алкоторг' in network_lower or 'алкомаркет' in network_lower:
+            has_grocery = True
+        
+        return {
+            'network': network,
+            'address': address,
+            'format': store_format,
+            'estimated_area': estimated_area,
+            'has_alcohol': has_alcohol,
+            'has_grocery': has_grocery,
+            'estimated_avg_check': 500,  # средний чек по умолчанию
+            'coordinates': coords,
+            'source': 'network_profile',
+            'confidence': 'medium'
+        }
 
     def process_address(self, network: str, address: str, store_format: str = None) -> Dict[str, Any]:
         """Обработка одного адреса"""
@@ -763,7 +834,7 @@ class EnhancedOSMExtractor:
                     self.process_address(retail_chain, address, store_format)
                     
                     # Небольшая задержка между запросами
-                    time.sleep(1)
+                    time.sleep(3)
                     
                 except Exception as e:
                     logger.error(f"Ошибка при обработке {retail_chain} - {address}: {e}")
