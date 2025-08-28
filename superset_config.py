@@ -1,21 +1,9 @@
-
-
-from flask import Flask
+# /app/pythonpath/superset_config.py
 import os
 
 # ========================
 # Безопасность
 # ========================
-
-# В superset_config.py
-from superset.typing import DashboardMeta
-FEATURE_FLAGS = {
-    "ALLOW_FULL_JSONP": True,
-    "DASHBOARD_CACHE": True,
-}
-
-# Используйте OpenStreetMap вместо Mapbox
-DECK_GL_MAP_STYLE = "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json"
 
 SECRET_KEY = "Icgez+z6E/2YkbSzBS2s4ZHlMCYhgOelN/oqEE6U8mH2qE8bltzHU2Z2"
 WTF_CSRF_ENABLED = True
@@ -23,8 +11,64 @@ SESSION_COOKIE_SECURE = False
 ENCRYPTED_FIELD_KEY = SECRET_KEY[:32]
 
 # ========================
+# Флаги функциональности
+# ========================
+
+FEATURE_FLAGS = {
+    "ALLOW_FULL_JSONP": True,
+    "DASHBOARD_CACHE": True, 
+    "ENABLE_DECK_GL": True,
+    "ENABLE_GEO_JSON": True,
+    "ENABLE_TEMPLATE_PROCESSING": True,
+    "GENERIC_CHART_AXES": True,
+}
+
+# Включение ECharts (часто используется для карт)
+ENABLE_EXPLORE_JSON_CSRF_PROTECTION = False
+ENABLE_EXPLORE_DRAG_AND_DROP = True
+# ========================
+# Настройки карт
+# ========================
+
+MAPBOX_API_KEY = ""
+ENABLE_PROXY_FOR_MAPBOX = True
+
+# Настройки области просмотра для России
+DEFAULT_MAP_VIEWPORT = {
+    "longitude": 94.0,
+    "latitude": 65.0,
+    "zoom": 3,
+    "bearing": 0,
+    "pitch": 0
+}
+
+# Стиль карты по умолчанию
+DECK_GL_MAP_STYLE = "mapbox://styles/mapbox/light-v9"
+
+# Включение поддержки ECharts
+ENABLE_ECHARTS = True
+
+# Регистрация ECharts визуализаций
+ADDITIONAL_VISUALIZATIONS = [
+    {
+        "name": "ECharts",
+        "key": "echarts",
+        "type": "chart"
+    }
+]
+
+# Настройки карт ECharts
+ECHARTS_MAP_CONFIG = {
+    "Russia": {
+        "geoJSON": "/maps/Russia_regions.geojson",
+        "specialAreas": {}
+    }
+}
+
+# ========================
 # Языковые настройки
 # ========================
+
 BABEL_DEFAULT_LOCALE = 'ru'
 LANGUAGES = {
     'en': {'flag': 'us', 'name': 'English'},
@@ -34,27 +78,67 @@ LANGUAGES = {
 # ========================
 # Настройки баз данных
 # ========================
+
 SQLALCHEMY_DATABASE_URI = "sqlite:////app/superset_data/superset.db"
 SQLALCHEMY_TRACK_MODIFICATIONS = False
 
 # ========================
 # ClickHouse конфигурация
 # ========================
+
 CLICKHOUSE_DATABASE_URI = "clickhouse+http://admin:123@clickhouse:8123/default"
 
 # ========================
 # Настройки производительности
 # ========================
+
 SUPERSET_WEBSERVER_TIMEOUT = 300
-SUPERSET_FEATURE_FLAGS = {
-    "ENABLE_TEMPLATE_PROCESSING": True,
-    "DASHBOARD_CROSS_FILTERS": True,
-    "GLOBAL_ASYNC_QUERIES": True,
-}
+
+# ========================
+# Дополнительные настройки
+# ========================
+
+PREVENT_UNSAFE_DB_CONNECTIONS = False
+ENABLE_TIME_ROTATE = False
+LOG_LEVEL = 'INFO'
+
+# ========================
+# Serving GeoJSON files via HTTP
+# ========================
+
+GEOJSON_STORAGE = "/app/superset_data/maps"
+
+# Функция для добавления кастомных роутов
+def flask_app_mutator(app):
+    from flask import send_from_directory
+    
+    @app.route('/maps/<path:filename>')
+    def serve_maps(filename):
+        return send_from_directory(GEOJSON_STORAGE, filename)
+    
+    return app
+
+FLASK_APP_MUTATOR = flask_app_mutator
+
+# ========================
+# Проверка доступности GeoJSON файлов
+# ========================
+
+def check_geojson_files():
+    maps_dir = GEOJSON_STORAGE
+    if os.path.exists(maps_dir):
+        files = os.listdir(maps_dir)
+        print(f"Available GeoJSON files: {files}")
+        return files
+    else:
+        print(f"Directory {maps_dir} does not exist!")
+        os.makedirs(maps_dir, exist_ok=True)
+        return []
 
 # ========================
 # Тест подключения к ClickHouse
 # ========================
+
 def test_clickhouse_connection():
     try:
         from sqlalchemy import create_engine
@@ -83,7 +167,8 @@ def test_clickhouse_connection():
 # ========================
 # Инициализация приложения
 # ========================
-def init_app(app: Flask):
+
+def init_app(app):
     # Безопасность
     app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', SECRET_KEY)
     app.config['ENCRYPTED_FIELD_KEY'] = os.environ.get('ENCRYPTED_FIELD_KEY', ENCRYPTED_FIELD_KEY)
@@ -100,7 +185,13 @@ def init_app(app: Flask):
     
     # Производительность
     app.config['SUPERSET_WEBSERVER_TIMEOUT'] = SUPERSET_WEBSERVER_TIMEOUT
-    app.config['SUPERSET_FEATURE_FLAGS'] = SUPERSET_FEATURE_FLAGS
+    
+    # Картографические настройки
+    app.config['DECK_GL_MAP_STYLE'] = DECK_GL_MAP_STYLE
+    app.config['MAPBOX_API_KEY'] = MAPBOX_API_KEY
+    
+    # Флаги функциональности
+    app.config['FEATURE_FLAGS'] = FEATURE_FLAGS
     
     # Тестируем подключение
     try:
@@ -115,18 +206,11 @@ def init_app(app: Flask):
     print("✓ Superset configuration initialized")
 
 # ========================
-# Дополнительные настройки
+# Принудительная регистрация драйвера
 # ========================
-PREVENT_UNSAFE_DB_CONNECTIONS = False
-ENABLE_TIME_ROTATE = False
-LOG_LEVEL = 'INFO'
 
-# ========================
-# Принудительная регистрация драйвера (после инициализации)
-# ========================
 def register_clickhouse_driver():
     try:
-        # Простая регистрация через импорт
         import clickhouse_sqlalchemy
         print("✓ ClickHouse SQLAlchemy driver loaded")
         return True
@@ -134,5 +218,12 @@ def register_clickhouse_driver():
         print(f"✗ ClickHouse driver not available: {e}")
         return False
 
-# Запускаем регистрацию при загрузке модуля
+# ========================
+# Инициализация при загрузке
+# ========================
+
+# Проверяем файлы при старте
+check_geojson_files()
+
+# Регистрируем драйвер
 register_clickhouse_driver()
