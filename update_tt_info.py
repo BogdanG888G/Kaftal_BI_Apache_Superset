@@ -456,11 +456,24 @@ class YandexGeoProcessor:
             # Проверяем статус ответа
             if response.status_code != 200:
                 logger.error(f"Ошибка HTTP {response.status_code}: {response.text}")
+                
+                # Проверяем, не исчерпан ли лимит API
+                if response.status_code == 403 or "limit" in response.text.lower():
+                    logger.error("⚠️  Лимит API запросов исчерпан!")
+                    return {"success": False, "api_limit_exceeded": True}
+                    
                 return None
                 
             response.raise_for_status()
             
             geocode_data = response.json()
+            
+            # Проверяем наличие ошибки лимита в JSON ответе
+            if (geocode_data.get('status') == 403 or 
+                'limit' in str(geocode_data).lower()):
+                logger.error("⚠️  Лимит API запросов исчерпан!")
+                return {"success": False, "api_limit_exceeded": True}
+            
             location_info = self._parse_geocode(geocode_data, address)
             
             if location_info:
@@ -483,7 +496,8 @@ class YandexGeoProcessor:
         """
         Обрабатывает только новые адреса, не более max_requests за запуск
         """
-        stats = {'fetched': 0, 'processed': 0, 'saved': 0, 'skipped_exists': 0, 'errors': 0, 'api_requests': 0}
+        stats = {'fetched': 0, 'processed': 0, 'saved': 0, 'skipped_exists': 0, 
+                'errors': 0, 'api_requests': 0, 'api_limit_hit': False}
 
         try:
             conn = get_db_connection()
@@ -521,12 +535,16 @@ class YandexGeoProcessor:
             
             for row in rows_to_process:
                 try:
+                    # Проверяем, не достигнут ли лимит API
+                    if stats['api_limit_hit']:
+                        logger.info("Лимит API достигнут, пропускаем оставшиеся адреса")
+                        break
+
                     retail_chain = row[0]
                     store_format = row[1] if len(row) > 1 else ''
                     address = row[2] if len(row) > 2 else ''
 
                     stats['processed'] += 1
-                    stats['api_requests'] += 1  # Считаем API запросы
 
                     # Обновляем описание прогресс-бара
                     pbar.set_postfix({
@@ -540,6 +558,13 @@ class YandexGeoProcessor:
 
                     # Геокодим через Яндекс
                     geodata = self.get_location_info(address)
+                    stats['api_requests'] += 1  # Считаем API запросы
+
+                    # Проверяем, не исчерпан ли лимит API
+                    if geodata and geodata.get('api_limit_exceeded'):
+                        stats['api_limit_hit'] = True
+                        logger.error("⚠️  Прерывание обработки: лимит API исчерпан!")
+                        break
 
                     if geodata and geodata.get('success'):
                         city = geodata.get('city')
@@ -592,6 +617,8 @@ class YandexGeoProcessor:
                 pass
 
             logger.info(f"Геокодирование завершено. API запросов: {stats['api_requests']}")
+            if stats['api_limit_hit']:
+                logger.info("⚠️  Обработка прервана из-за исчерпания лимита API")
             logger.info(f"Статистика: {stats}")
             return stats
 
@@ -827,7 +854,6 @@ def get_today_api_usage(self) -> int:
         logger.error(f"Ошибка при получении статистики API: {e}")
         return 0
 
-# В main функции можно добавить проверку:
 def main():
     print("🔍 Запуск обработки данных из БД")
     
@@ -847,7 +873,9 @@ def main():
     print(f"   Сохранено: {stats['saved']}")
     print(f"   Ошибок: {stats['errors']}")
     
-    if stats['api_requests'] >= 1000:
+    if stats['api_limit_hit']:
+        print("\n⚠️  Достигнут лимит API запросов! Обработка прервана.")
+    elif stats['api_requests'] >= 1000:
         print("\n⚠️  Достигнут лимит в 1000 API запросов. Запустите завтра для продолжения.")
 
 if __name__ == "__main__":
