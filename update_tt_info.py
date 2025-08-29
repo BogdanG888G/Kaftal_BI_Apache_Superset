@@ -766,7 +766,8 @@ def get_today_api_usage(self) -> int:
 def main():
     print("🔍 Запуск обработки данных из БД")
     
-    API_KEY = "54bf3eb1-a2d7-400b-9928-acc90a2a5780"
+    #API_KEY = "54bf3eb1-a2d7-400b-9928-acc90a2a5780"
+    API_KEY = "2056b23c-648c-4952-ac7a-d5952575e7db"
     processor = YandexGeoProcessor(api_key=API_KEY)
     
     # Обработка только новых записей, максимум 1000 API запросов
