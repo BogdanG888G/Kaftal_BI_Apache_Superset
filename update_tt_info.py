@@ -12,6 +12,8 @@ import os
 import pyodbc
 import numpy as np
 from tqdm import tqdm
+from datetime import date
+
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -208,8 +210,8 @@ class YandexGeoProcessor:
             }
         }
 
-    def get_sales_data(self, retail_chain: str, address: str) -> Dict[str, Any]:
-        """Получение данных о продажах из исходной таблицы"""
+    def get_sales_data(self, retail_chain: str, address: str, sale_date: date) -> Dict[str, Any]:
+        """Получение данных о продажах из исходной таблицы за конкретную дату"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -221,63 +223,47 @@ class YandexGeoProcessor:
                 AVG(avg_sell_price) as avg_sell,
                 AVG(avg_cost_price) as avg_cost
             FROM [Stage].[bi].[ALL_DATA_COMPETITORS_MATERIALIZED]
-            WHERE retail_chain = ? AND address = ?
-            GROUP BY retail_chain, address
+            WHERE retail_chain = ? AND address = ? AND sale_date = ?
+            GROUP BY retail_chain, address, sale_date
             """
-            
-            cursor.execute(sql, retail_chain, address)
+            cursor.execute(sql, retail_chain, address, sale_date)
             row = cursor.fetchone()
             
             if row:
                 return {
-                    'sales_quantity': row.total_quantity if row.total_quantity else 0,
-                    'sales_amount_rub': row.total_amount if row.total_amount else 0.0,
-                    'avg_sell_price': row.avg_sell if row.avg_sell else 0.0,
-                    'avg_cost_price': row.avg_cost if row.avg_cost else 0.0
+                    'sales_quantity': row.total_quantity or 0,
+                    'sales_amount_rub': row.total_amount or 0.0,
+                    'avg_sell_price': row.avg_sell or 0.0,
+                    'avg_cost_price': row.avg_cost or 0.0
                 }
             else:
-                # Если данных нет, возвращаем нулевые значения
-                return {
-                    'sales_quantity': 0,
-                    'sales_amount_rub': 0.0,
-                    'avg_sell_price': 0.0,
-                    'avg_cost_price': 0.0
-                }
-            
+                return {'sales_quantity': 0, 'sales_amount_rub': 0.0, 'avg_sell_price': 0.0, 'avg_cost_price': 0.0}
+        
         except Exception as e:
             logger.error(f"Ошибка при получении данных о продажах: {e}")
-            return {
-                'sales_quantity': 0,
-                'sales_amount_rub': 0.0,
-                'avg_sell_price': 0.0,
-                'avg_cost_price': 0.0
-            }
+            return {'sales_quantity': 0, 'sales_amount_rub': 0.0, 'avg_sell_price': 0.0, 'avg_cost_price': 0.0}
+
 
     def get_data_from_source_table(self) -> List[Dict]:
-        """Получение данных из исходной таблицы"""
+        """Получение новых записей с sale_date"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            
-            sql = f"""
-            SELECT distinct retail_chain, store_format, address
-            FROM [Stage].[bi].[ALL_DATA_COMPETITORS_MATERIALIZED]
-            WHERE retail_chain IS NOT NULL AND address IS NOT NULL
+            sql = """
+            SELECT DISTINCT adc.sale_date, adc.retail_chain, adc.store_format, adc.address
+            FROM [Stage].[bi].[ALL_DATA_COMPETITORS_MATERIALIZED] adc
+            LEFT JOIN [Stage].[bi].[STORE_CHARACTERISTICS] sc 
+                ON adc.retail_chain = sc.retail_chain 
+                AND adc.address = sc.address
+                AND adc.sale_date = sc.sale_date
+            WHERE adc.retail_chain IS NOT NULL 
+                AND adc.address IS NOT NULL
+                AND sc.retail_chain IS NULL
             """
-            
             cursor.execute(sql)
             rows = cursor.fetchall()
-            
-            result = []
-            for row in rows:
-                result.append({
-                    'retail_chain': row.retail_chain,
-                    'store_format': row.store_format,
-                    'address': row.address
-                })
-            
-            return result
-            
+            return [{'sale_date': row.sale_date, 'retail_chain': row.retail_chain,
+                    'store_format': row.store_format, 'address': row.address} for row in rows]
         except Exception as e:
             logger.error(f"Ошибка при получении данных из таблицы: {e}")
             return []
@@ -323,84 +309,61 @@ class YandexGeoProcessor:
         return int(np.random.uniform(area_range[0], area_range[1]))
 
     def save_to_database(self, data: Dict[str, Any]) -> bool:
-        """Сохраняет данные о торговой точке в базу данных"""
+        """Сохраняет данные о торговой точке в базу данных с учетом sale_date"""
+        retail_chain = data.get('network', '')
+        store_format = data.get('format', '')
+        address = data.get('original_address', data.get('address', ''))
+        sale_date = data.get('sale_date') or date.today()
+
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            # Проверяем, существует ли уже запись с таким адресом и сетью
             check_sql = """
             SELECT COUNT(*) FROM [Stage].[bi].[STORE_CHARACTERISTICS] 
-            WHERE retail_chain = ? AND address = ?
+            WHERE retail_chain = ? AND address = ? AND sale_date = ?
             """
-            cursor.execute(check_sql, data.get('network', ''), data.get('original_address', data.get('address', '')))
+            cursor.execute(check_sql, retail_chain, address, sale_date)
             count = cursor.fetchone()[0]
-            
             if count > 0:
-                logger.info(f"Запись уже существует: {data.get('network', '')} - {data.get('original_address', data.get('address', ''))}")
-                return False  # Возвращаем False, чтобы статистика правильно считалась
-            
-            # Подготовка данных для вставки
-            retail_chain = data.get('network', '')
-            store_format = data.get('format', '')
-            address = data.get('original_address', data.get('address', ''))
+                logger.info(f"Запись уже существует: {retail_chain} - {address} - {sale_date}")
+                return False
+
             city = data.get('city', 'Неизвестно')
-            region = data.get('region', 'Неизвестно')
             federal_district = data.get('federal_district', 'Неизвестно')
             federal_subject = data.get('federal_subject', 'Неизвестно')
             lat = data.get('coordinates', {}).get('lat', 0)
             lon = data.get('coordinates', {}).get('lon', 0)
-            
-            # Определяем площадь: если есть из OSM, используем, иначе из диапазона
-            if data.get('area') is not None:
-                area_m2 = data.get('area')
-            else:
-                area_m2 = self.get_area_from_range(retail_chain, store_format)
-                
+            area_m2 = data.get('area') or self.get_area_from_range(retail_chain, store_format)
             has_alcohol_department = 1 if data.get('has_alcohol', False) else 1
             has_snacks = 1 if data.get('has_grocery', False) else 1
-            
-            # Определяем тип магазина
             store_type = self.get_store_type(retail_chain, store_format)
-            
-            # Получаем данные о продажах из исходной таблицы
-            sales_data = self.get_sales_data(retail_chain, address)
+
+            # Получаем агрегированные продажи по дате
+            sales_data = self.get_sales_data(retail_chain, address, sale_date)
 
             sql = """
             INSERT INTO [Stage].[bi].[STORE_CHARACTERISTICS] 
-            (retail_chain, store_format, store_type, address, city, 
+            (retail_chain, store_format, store_type, address, sale_date, city, 
             federal_district, federal_subject,
             sales_quantity, sales_amount_rub, avg_sell_price, avg_cost_price, 
             lat, lon, area_m2, has_alcohol_department, has_snacks, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE())
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE())
             """
-
             cursor.execute(sql, 
-                retail_chain, 
-                store_format, 
-                store_type,
-                address,
-                city,
-                federal_district,
-                federal_subject,
-                sales_data['sales_quantity'],
-                sales_data['sales_amount_rub'],
-                sales_data['avg_sell_price'],
-                sales_data['avg_cost_price'],
-                lat, 
-                lon, 
-                area_m2, 
-                has_alcohol_department, 
-                has_snacks
-            )
-
+                        retail_chain, store_format, store_type, address, sale_date,
+                        city, federal_district, federal_subject,
+                        sales_data['sales_quantity'], sales_data['sales_amount_rub'],
+                        sales_data['avg_sell_price'], sales_data['avg_cost_price'],
+                        lat, lon, area_m2, has_alcohol_department, has_snacks)
             conn.commit()
-            logger.info(f"Данные успешно сохранены в базу для {retail_chain} - {address} (город: {city}, регион: {region}, округ: {federal_district}, субъект: {federal_subject})")
+            logger.info(f"Данные успешно сохранены: {retail_chain} - {address} - {sale_date}")
             return True
-            
+        
         except Exception as e:
-            logger.error(f"Ошибка при сохранении в базу данных: {e}")
+            logger.error(f"Ошибка при сохранении в базу данных для {retail_chain} - {address}: {e}")
             return False
+
 
     def save_store_location(self, data: Dict[str, Any]) -> bool:
         """
@@ -410,7 +373,8 @@ class YandexGeoProcessor:
             # Получаем данные о продажах
             retail_chain = data.get('network') or data.get('retail_chain') or ''
             address = data.get('original_address') or data.get('address') or ''
-            sales_data = self.get_sales_data(retail_chain, address)
+            sales_data = self.get_sales_data(retail_chain, address, sale_date)
+
             
             # Объединяем данные
             full_data = {
@@ -490,142 +454,87 @@ class YandexGeoProcessor:
             logger.error(f"Ошибка обработки адреса {address}: {e}")
             return None
 
-    def process_source_table(self,
-                         max_requests: int = 1000,
-                         sleep_between: float = 0.5) -> Dict[str, int]:
-        """
-        Обрабатывает только новые адреса, не более max_requests за запуск
-        """
-        stats = {'fetched': 0, 'processed': 0, 'saved': 0, 'skipped_exists': 0, 
-                'errors': 0, 'api_requests': 0, 'api_limit_hit': False}
+    def process_source_table(self, max_requests: int = 1000, sleep_between: float = 0.5) -> Dict[str, int]:
+        """Обрабатывает новые адреса с конкретной датой продажи"""
+        stats = {'fetched': 0, 'processed': 0, 'saved': 0, 'errors': 0,
+                'api_requests': 0, 'api_limit_hit': False}
 
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-
-            # Выбираем только те адреса, которых еще нет в STORE_CHARACTERISTICS
-            sql = """
-            SELECT DISTINCT adc.retail_chain, adc.store_format, adc.address
-            FROM [Stage].[bi].[ALL_DATA_COMPETITORS_MATERIALIZED] adc
-            LEFT JOIN [Stage].[bi].[STORE_CHARACTERISTICS] sc 
-                ON adc.retail_chain = sc.retail_chain 
-                AND adc.address = sc.address
-            WHERE adc.retail_chain IS NOT NULL 
-                AND adc.address IS NOT NULL
-                AND sc.retail_chain IS NULL  -- Только те, которых нет в результатах
-            """
-
-            cursor.execute(sql)
-            rows = cursor.fetchall()
+            rows = self.get_data_from_source_table()
             stats['fetched'] = len(rows)
-            
-            # Ограничиваем количество обрабатываемых записей
             rows_to_process = rows[:max_requests]
             total_to_process = len(rows_to_process)
-            
             logger.info(f"Найдено новых записей: {stats['fetched']}")
-            logger.info(f"Будет обработано (ограничение {max_requests}): {total_to_process}")
-
+            logger.info(f"Будет обработано (лимит {max_requests}): {total_to_process}")
             if total_to_process == 0:
-                logger.info("Нет новых записей для обработки")
                 return stats
 
-            # Создаем прогресс-бар
             pbar = tqdm(total=total_to_process, desc="Обработка адресов", unit="адрес")
-            
             for row in rows_to_process:
                 try:
-                    # Проверяем, не достигнут ли лимит API
                     if stats['api_limit_hit']:
-                        logger.info("Лимит API достигнут, пропускаем оставшиеся адреса")
                         break
 
-                    retail_chain = row[0]
-                    store_format = row[1] if len(row) > 1 else ''
-                    address = row[2] if len(row) > 2 else ''
-
+                    sale_date = row['sale_date']
+                    retail_chain = row['retail_chain']
+                    store_format = row.get('store_format', '')
+                    address = row['address']
                     stats['processed'] += 1
 
-                    # Обновляем описание прогресс-бара
-                    pbar.set_postfix({
-                        'обработано': stats['processed'],
-                        'осталось': total_to_process - stats['processed'],
-                        'сохранено': stats['saved'],
-                        'ошибки': stats['errors'],
-                        'api_запросов': stats['api_requests']
-                    })
+                    pbar.set_postfix({'обработано': stats['processed'],
+                                    'осталось': total_to_process - stats['processed'],
+                                    'сохранено': stats['saved'],
+                                    'ошибки': stats['errors'],
+                                    'api_запросов': stats['api_requests']})
                     pbar.update(1)
 
-                    # Геокодим через Яндекс
                     geodata = self.get_location_info(address)
-                    stats['api_requests'] += 1  # Считаем API запросы
-
-                    # Проверяем, не исчерпан ли лимит API
+                    stats['api_requests'] += 1
                     if geodata and geodata.get('api_limit_exceeded'):
                         stats['api_limit_hit'] = True
-                        logger.error("⚠️  Прерывание обработки: лимит API исчерпан!")
                         break
 
                     if geodata and geodata.get('success'):
                         city = geodata.get('city')
                         federal_district = geodata.get('federal_district')
                         federal_subject = geodata.get('federal_subject')
-                        lat = geodata.get('lat')
-                        lon = geodata.get('lon')
-                        coords = {'lat': lat, 'lon': lon}
+                        coords = {'lat': geodata.get('lat'), 'lon': geodata.get('lon')}
                     else:
-                        # Фолбэк: извлекаем из текста адреса
                         fallback = self._extract_from_address(address)
                         city = fallback.get('city', 'Неизвестно')
                         federal_district = fallback.get('region', 'Неизвестно')
                         federal_subject = fallback.get('federal_subject', 'Неизвестно')
                         coords = {'lat': 0.0, 'lon': 0.0}
 
-                    data = {
-                        'network': retail_chain,
-                        'retail_chain': retail_chain,
-                        'format': store_format,
-                        'original_address': address,
-                        'address': address,
-                        'city': city,
-                        'region': federal_district,
-                        'federal_district': federal_district,
-                        'federal_subject': federal_subject,
-                        'coordinates': coords,
-                    }
+                    data = {'sale_date': sale_date, 'network': retail_chain,
+                            'retail_chain': retail_chain, 'format': store_format,
+                            'original_address': address, 'address': address,
+                            'city': city, 'region': federal_district,
+                            'federal_district': federal_district,
+                            'federal_subject': federal_subject,
+                            'coordinates': coords}
 
-                    # Сохраняем
-                    saved = self.save_store_location(data)
+                    saved = self.save_to_database(data)
                     if saved:
                         stats['saved'] += 1
                     else:
                         stats['errors'] += 1
 
-                    # Небольшая пауза чтобы не бить по API
                     time.sleep(sleep_between)
 
                 except Exception as e_row:
                     logger.error(f"Ошибка при обработке строки {row}: {e_row}")
                     stats['errors'] += 1
 
-            # Закрываем прогресс-бар
             pbar.close()
-            
-            try:
-                cursor.close()
-            except:
-                pass
-
-            logger.info(f"Геокодирование завершено. API запросов: {stats['api_requests']}")
-            if stats['api_limit_hit']:
-                logger.info("⚠️  Обработка прервана из-за исчерпания лимита API")
-            logger.info(f"Статистика: {stats}")
+            logger.info(f"Обработка завершена. API запросов: {stats['api_requests']}")
             return stats
 
         except Exception as e:
             logger.error(f"Ошибка при чтении исходной таблицы: {e}")
             stats['errors'] += 1
             return stats
+
     
     def _parse_geocode(self, data: Dict, original_address: str) -> Optional[Dict]:
         """Парсинг ответа геокодера с улучшенным определением регионов"""
