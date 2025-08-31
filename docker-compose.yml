@@ -116,21 +116,21 @@ services:
     restart: on-failure
 
   geojson-loader:
-  build:
-    context: .
-    dockerfile: Dockerfile.geojson-data
-  container_name: geojson-loader
-  depends_on:
-    - clickhouse
-    - superset
-  networks:
-    - superset-network
-  environment:
-    - SUPERSET_HOST=superset
-    - SUPERSET_PORT=8088
-  volumes:
-    - ./superset_data:/app/superset_data
-  restart: on-failure
+    build:
+      context: .
+      dockerfile: Dockerfile.geojson-data
+    container_name: geojson-loader
+    depends_on:
+      - clickhouse
+      - superset
+    networks:
+      - superset-network
+    environment:
+      - SUPERSET_HOST=superset
+      - SUPERSET_PORT=8088
+    volumes:
+      - ./superset_data:/app/superset_data
+    restart: on-failure
 
 volumes:
   superset_data:
