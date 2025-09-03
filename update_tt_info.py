@@ -14,7 +14,6 @@ import numpy as np
 from tqdm import tqdm
 from datetime import date
 
-
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -64,8 +63,9 @@ def get_db_connection():
         return conn
 
 class YandexGeoProcessor:
-    def __init__(self, api_key: str = None):
-        self.api_key = api_key
+    def __init__(self, api_keys: List[str] = None):
+        self.api_keys = api_keys or []
+        self.current_key_index = 0
         self.geocoder_url = "https://geocode-maps.yandex.ru/1.x/"
         self.session = requests.Session()
         self.session.headers.update({
@@ -209,6 +209,43 @@ class YandexGeoProcessor:
                 'default': 'магазин у дома'.capitalize()
             }
         }
+
+    def get_current_api_key(self):
+        """Получение текущего API ключа"""
+        if not self.api_keys:
+            return None
+        return self.api_keys[self.current_key_index]
+
+    def switch_to_next_key(self):
+        """Переключение на следующий API ключ с проверкой на исчерпанность"""
+        if not self.api_keys:
+            return False
+        
+        original_index = self.current_key_index
+        attempts = 0
+        
+        while attempts < len(self.api_keys):
+            self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
+            current_key = self.api_keys[self.current_key_index]
+            
+            # Проверяем, не исчерпан ли ключ (здесь можно добавить дополнительную логику)
+            if not self.is_key_exhausted(current_key):
+                logger.info(f"Переключились на ключ: {current_key[:8]}...{current_key[-4:]}")
+                return True
+            
+            attempts += 1
+    
+    
+    def is_key_exhausted(self, key: str) -> bool:
+        """Проверяет, исчерпан ли ключ (заглушка, можно реализовать логику проверки)"""
+        # Здесь можно добавить логику проверки, был ли ключ уже использован сегодня
+        # и исчерпал ли свой лимит. Пока возвращаем False для простоты.
+        return False
+        
+        # Если все ключи исчерпаны
+        logger.error("Все доступные ключи исчерпаны!")
+        self.current_key_index = original_index  # Возвращаем оригинальный индекс
+        return False
 
     def get_sales_data(self, retail_chain: str, address: str, sale_date: date) -> Dict[str, Any]:
         """Получение данных о продажах из исходной таблицы за конкретную дату"""
@@ -395,8 +432,8 @@ class YandexGeoProcessor:
 
     def get_location_info(self, address: str) -> Optional[Dict]:
         """Получение информации о местоположении с ограничением по России"""
-        if not self.api_key:
-            logger.warning("API ключ не указан. Геокодирование невозможно.")
+        if not self.api_keys:
+            logger.warning("API ключи не указаны. Геокодирование невозможно.")
             return None
             
         try:
@@ -409,11 +446,11 @@ class YandexGeoProcessor:
                 'geocode': address_with_country,
                 'format': 'json',
                 'results': 5,
-                'apikey': self.api_key,
+                'apikey': self.get_current_api_key(),
                 'lang': 'ru_RU'
             }
             
-            logger.info(f"Геокодируем адрес: {address}")
+            logger.info(f"Геокодируем адрес: {address} с ключом: {self.get_current_api_key()[:8]}...{self.get_current_api_key()[-4:]}")
             
             response = self.session.get(self.geocoder_url, params=params, timeout=15)
             
@@ -423,8 +460,16 @@ class YandexGeoProcessor:
                 
                 # Проверяем, не исчерпан ли лимит API
                 if response.status_code == 403 or "limit" in response.text.lower():
-                    logger.error("⚠️  Лимит API запросов исчерпан!")
-                    return {"success": False, "api_limit_exceeded": True}
+                    logger.error("⚠️ Лимит API запросов исчерпан для текущего ключа!")
+                    # Помечаем текущий ключ как невалидный на сегодня
+                    self.mark_key_as_exhausted(self.get_current_api_key())
+                    
+                    if self.switch_to_next_key():
+                        # Рекурсивно повторяем запрос с новым ключом
+                        return self.get_location_info(address)
+                    else:
+                        logger.error("⚠️ Все ключи исчерпаны!")
+                        return {"success": False, "api_limit_exceeded": True}
                     
                 return None
                 
@@ -435,8 +480,16 @@ class YandexGeoProcessor:
             # Проверяем наличие ошибки лимита в JSON ответе
             if (geocode_data.get('status') == 403 or 
                 'limit' in str(geocode_data).lower()):
-                logger.error("⚠️  Лимит API запросов исчерпан!")
-                return {"success": False, "api_limit_exceeded": True}
+                logger.error("⚠️ Лимит API запросов исчерпан для текущего ключа!")
+                # Помечаем текущий ключ как невалидный на сегодня
+                self.mark_key_as_exhausted(self.get_current_api_key())
+                
+                if self.switch_to_next_key():
+                    # Рекурсивно повторяем запрос с новым ключом
+                    return self.get_location_info(address)
+                else:
+                    logger.error("⚠️ Все ключи исчерпаны!")
+                    return {"success": False, "api_limit_exceeded": True}
             
             location_info = self._parse_geocode(geocode_data, address)
             
@@ -454,7 +507,14 @@ class YandexGeoProcessor:
             logger.error(f"Ошибка обработки адреса {address}: {e}")
             return None
 
-    def process_source_table(self, max_requests: int = 1000, sleep_between: float = 0.5) -> Dict[str, int]:
+    def mark_key_as_exhausted(self, key: str):
+        """Помечает ключ как исчерпанный на сегодня"""
+        # Можно добавить логику для сохранения информации об исчерпанных ключах
+        # Например, в базу данных или файл
+        logger.warning(f"Ключ {key[:8]}...{key[-4:]} помечен как исчерпанный")
+
+
+    def process_source_table(self, max_requests: int = 2000, sleep_between: float = 0.5) -> Dict[str, int]:
         """Обрабатывает новые адреса с конкретной датой продажи"""
         stats = {'fetched': 0, 'processed': 0, 'saved': 0, 'errors': 0,
                 'api_requests': 0, 'api_limit_hit': False}
@@ -490,21 +550,25 @@ class YandexGeoProcessor:
 
                     geodata = self.get_location_info(address)
                     stats['api_requests'] += 1
+                    
+                    # Проверяем, не исчерпаны ли все ключи
                     if geodata and geodata.get('api_limit_exceeded'):
                         stats['api_limit_hit'] = True
+                        logger.error("Все ключи исчерпаны, прекращаем обработку")
                         break
 
                     if geodata and geodata.get('success'):
+                        # Используем данные геокодера
                         city = geodata.get('city')
                         federal_district = geodata.get('federal_district')
                         federal_subject = geodata.get('federal_subject')
                         coords = {'lat': geodata.get('lat'), 'lon': geodata.get('lon')}
                     else:
-                        fallback = self._extract_from_address(address)
-                        city = fallback.get('city', 'Неизвестно')
-                        federal_district = fallback.get('region', 'Неизвестно')
-                        federal_subject = fallback.get('federal_subject', 'Неизвестно')
-                        coords = {'lat': 0.0, 'lon': 0.0}
+                        # Пропускаем запись, если не удалось получить геоданные
+                        # и все ключи исчерпаны
+                        if stats['api_limit_hit']:
+                            logger.warning(f"Пропускаем адрес {address} из-за исчерпания ключей")
+                            continue
 
                     data = {'sale_date': sale_date, 'network': retail_chain,
                             'retail_chain': retail_chain, 'format': store_format,
@@ -766,14 +830,34 @@ def get_today_api_usage(self) -> int:
 def main():
     print("🔍 Запуск обработки данных из БД")
     
-    #API_KEY = "54bf3eb1-a2d7-400b-9928-acc90a2a5780"
-    API_KEY = "2056b23c-648c-4952-ac7a-d5952575e7db"
-    processor = YandexGeoProcessor(api_key=API_KEY)
+    # Список API ключей
+    API_KEYS = [
+        '4eafaf6f-51c9-47d0-be01-cddf8e94f4a7',
+        '18ffa901-3ca3-4490-9222-ed66046d64d7',
+        '27b61e45-ccdd-4c16-b6c7-e9c6e38c01f7',
+        '694470aa-33bb-49c8-a0ba-1be0e99ec787',
+        '54bf3eb1-a2d7-400b-9928-acc90a2a5780',
+        '22706d49-4f15-41d6-892b-cde7473200de',
+        '2056b23c-648c-4952-ac7a-d5952575e7db',
+        '4f0efc9d-e486-4952-983d-dd4847d599a8',
+        '413dcd39-ba92-43a2-92e1-51cec7aa26cd',
+        '57bbd123-1ee5-48e8-95d3-9207318b7450',
+        'c81804b3-3b27-400e-8c8e-3c2d688d9d43',
+        '08fc2bb0-4759-40ff-b507-48005ba26947',
+        '7b730765-17f9-4eec-822b-839c92ad7cad'
+    ]
     
-    # Обработка только новых записей, максимум 1000 API запросов
+    processor = YandexGeoProcessor(api_keys=API_KEYS)
+
+    # Явный вывод информации о ключах
+    print(f"🔑 Используется {len(API_KEYS)} ключей")
+    for i, key in enumerate(API_KEYS):
+        print(f"  {i+1}. {key[:8]}...{key[-4:]}")
+    
+    # Обработка только новых записей, максимум 10000 API запросов
     stats = processor.process_source_table(
-        max_requests=1000,  # Ограничение на API запросы
-        sleep_between=1     # Пауза между запросами
+        max_requests=20000,  # Ограничение на API запросы
+        sleep_between=0.1     # Пауза между запросами
     )
     
     print(f"\n📊 Статистика обработки:")
@@ -784,9 +868,9 @@ def main():
     print(f"   Ошибок: {stats['errors']}")
     
     if stats['api_limit_hit']:
-        print("\n⚠️  Достигнут лимит API запросов! Обработка прервана.")
-    elif stats['api_requests'] >= 1000:
-        print("\n⚠️  Достигнут лимит в 1000 API запросов. Запустите завтра для продолжения.")
+        print("\n⚠️  Все ключи исчерпаны! Обработка прервана.")
+    elif stats['api_requests'] >= 10000:
+        print("\n⚠️  Достигнут лимит в 10000 API запросов. Запустите завтра для продолжения.")
 
 if __name__ == "__main__":
     main()
