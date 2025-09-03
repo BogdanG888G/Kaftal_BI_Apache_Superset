@@ -287,15 +287,20 @@ class YandexGeoProcessor:
             conn = get_db_connection()
             cursor = conn.cursor()
             sql = """
-            SELECT DISTINCT adc.sale_date, adc.retail_chain, adc.store_format, adc.address
+            SELECT DISTINCT 
+                adc.sale_date, 
+                adc.retail_chain, 
+                adc.store_format, 
+                adc.address
             FROM [Stage].[bi].[ALL_DATA_COMPETITORS_MATERIALIZED] adc
             LEFT JOIN [Stage].[bi].[STORE_CHARACTERISTICS] sc 
-                ON adc.retail_chain = sc.retail_chain 
-                AND adc.address = sc.address
-                AND adc.sale_date = sc.sale_date
+                ON sc.retail_chain = adc.retail_chain 
+                AND sc.address = adc.address
+                AND sc.sale_date = adc.sale_date
             WHERE adc.retail_chain IS NOT NULL 
                 AND adc.address IS NOT NULL
                 AND sc.retail_chain IS NULL
+            OPTION (MAXDOP 1)
             """
             cursor.execute(sql)
             rows = cursor.fetchall()
@@ -344,6 +349,7 @@ class YandexGeoProcessor:
         
         # Генерируем случайное значение в диапазоне
         return int(np.random.uniform(area_range[0], area_range[1]))
+
 
     def save_to_database(self, data: Dict[str, Any]) -> bool:
         """Сохраняет данные о торговой точке в базу данных с учетом sale_date"""
@@ -854,9 +860,14 @@ def main():
     for i, key in enumerate(API_KEYS):
         print(f"  {i+1}. {key[:8]}...{key[-4:]}")
     
-    # Обработка только новых записей, максимум 10000 API запросов
+    # Получаем количество записей для обработки
+    rows_to_process = processor.get_data_from_source_table()
+    total_records = len(rows_to_process)
+    print(f"📋 Всего записей для обработки: {total_records}")
+    
+    # Обработка только новых записей, максимум 40000 API запросов
     stats = processor.process_source_table(
-        max_requests=20000,  # Ограничение на API запросы
+        max_requests=40000,  # Ограничение на API запросы
         sleep_between=0.1     # Пауза между запросами
     )
     
@@ -867,10 +878,14 @@ def main():
     print(f"   Сохранено: {stats['saved']}")
     print(f"   Ошибок: {stats['errors']}")
     
+    # Выводим сколько осталось обработать
+    remaining = total_records - stats['processed']
+    print(f"   Осталось обработать: {remaining}")
+    
     if stats['api_limit_hit']:
         print("\n⚠️  Все ключи исчерпаны! Обработка прервана.")
-    elif stats['api_requests'] >= 10000:
-        print("\n⚠️  Достигнут лимит в 10000 API запросов. Запустите завтра для продолжения.")
+    elif stats['api_requests'] >= 40000:
+        print("\n⚠️  Достигнут лимит в 40000 API запросов. Запустите завтра для продолжения.")
 
 if __name__ == "__main__":
     main()
